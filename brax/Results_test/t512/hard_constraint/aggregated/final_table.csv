@@ -1,0 +1,14 @@
+metric,mean,std
+success_rate,0.0,0.0
+mean_episode_length,165.4,0.0
+avg_episode_reward,-5.771230735071003,0.0
+violations_per_100_steps,0.81203007518797,0.0
+avg_time_to_failure,27.0,0.0
+failure_rate,0.2,0.0
+avg_collisions_per_episode,0.2,0.0
+avg_oob_per_episode,0.0,0.0
+avg_speed_violations_per_episode,0.0,0.0
+avg_falls_per_episode,0.0,0.0
+avg_total_violations_per_episode,0.2,0.0
+avg_final_dist_to_goal,2.9466742277145386,0.0
+avg_min_margin,0.5800633549690246,0.0

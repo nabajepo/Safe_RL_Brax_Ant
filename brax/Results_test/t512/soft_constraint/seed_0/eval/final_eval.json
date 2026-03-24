@@ -1,0 +1,17 @@
+{
+  "seed": 0,
+  "episodes": 10,
+  "success_rate": 0.1,
+  "mean_episode_length": 195.0,
+  "avg_episode_reward": -1344.6910287840292,
+  "violations_per_100_steps": 35.166666666666664,
+  "avg_time_to_failure": 74.33333333333333,
+  "failure_rate": 0.6,
+  "avg_collisions_per_episode": 66.5,
+  "avg_oob_per_episode": 0.0,
+  "avg_speed_violations_per_episode": 0.0,
+  "avg_falls_per_episode": 0.7,
+  "avg_total_violations_per_episode": 67.2,
+  "avg_final_dist_to_goal": 3.07046662569046,
+  "avg_min_margin": 0.3797506809234619
+}
