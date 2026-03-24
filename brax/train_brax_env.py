@@ -1,0 +1,1118 @@
+# train_brax_env.py
+# =========================================================
+# End-to-end training script for the CSI4900 Brax project.
+#
+# This version aligns the evaluation with the professor request:
+#   - same violation types for soft and hard:
+#       * collision
+#       * out_of_bounds
+#       * speed_violation
+#       * fall
+#   - different handling:
+#       * no_constraint: no penalty, no early stop on violations
+#       * soft_constraint: penalties only
+#       * hard_constraint: penalties + immediate termination
+#
+# Main reported metrics:
+#   - violations_per_100_steps
+#   - success_rate
+#   - avg_time_to_failure
+#   - mean_episode_length
+#   - avg_collisions_per_episode
+#   - avg_episode_reward
+# =========================================================
+
+import csv
+import json
+import math
+import pickle
+import argparse
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+import jax
+import jax.numpy as jnp
+import optax
+
+import no_constraint_env_brax   # noqa: F401
+import soft_constraint_env_brax # noqa: F401
+import hard_constraint_env_brax # noqa: F401
+
+from baseline_env_brax import (
+    Cfg,
+    ENV_NAME_ORDER,
+    get_env_class,
+)
+
+
+# =========================================================
+# Utilities
+# =========================================================
+def ensure_dir(path):
+    Path(path).mkdir(parents=True, exist_ok=True)
+
+
+def format_budget_tag(timesteps: int) -> str:
+    if timesteps >= 1_000_000 and timesteps % 1_000_000 == 0:
+        return f"t{timesteps // 1_000_000}m"
+    if timesteps >= 1000 and timesteps % 1000 == 0:
+        return f"t{timesteps // 1000}k"
+    return f"t{timesteps}"
+
+
+def save_dict_rows_to_csv(rows, path):
+    if not rows:
+        return
+    ensure_dir(Path(path).parent)
+    keys = list(rows[0].keys())
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def save_dict_to_json(data, path):
+    ensure_dir(Path(path).parent)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def save_params(params, path):
+    ensure_dir(Path(path).parent)
+    with open(path, "wb") as f:
+        pickle.dump(params, f)
+
+
+def load_params(path):
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
+# =========================================================
+# Pure-JAX Actor-Critic Network
+# =========================================================
+def glorot_init(rng, in_dim, out_dim):
+    limit = math.sqrt(6.0 / (in_dim + out_dim))
+    w = jax.random.uniform(rng, (in_dim, out_dim), minval=-limit, maxval=limit)
+    b = jnp.zeros((out_dim,), dtype=jnp.float32)
+    return w.astype(jnp.float32), b
+
+
+def init_mlp_params(rng, obs_dim, action_dim, hidden_dim=256):
+    keys = jax.random.split(rng, 6)
+
+    pw1, pb1 = glorot_init(keys[0], obs_dim, hidden_dim)
+    pw2, pb2 = glorot_init(keys[1], hidden_dim, hidden_dim)
+    pwm, pbm = glorot_init(keys[2], hidden_dim, action_dim)
+
+    vw1, vb1 = glorot_init(keys[3], obs_dim, hidden_dim)
+    vw2, vb2 = glorot_init(keys[4], hidden_dim, hidden_dim)
+    vwo, vbo = glorot_init(keys[5], hidden_dim, 1)
+
+    params = {
+        "policy": {
+            "w1": pw1,
+            "b1": pb1,
+            "w2": pw2,
+            "b2": pb2,
+            "w_mean": pwm,
+            "b_mean": pbm,
+            "log_std": jnp.zeros((action_dim,), dtype=jnp.float32),
+        },
+        "value": {
+            "w1": vw1,
+            "b1": vb1,
+            "w2": vw2,
+            "b2": vb2,
+            "w_out": vwo,
+            "b_out": vbo,
+        },
+    }
+    return params
+
+
+def mlp_forward(params, obs):
+    p = params["policy"]
+    px = jnp.tanh(obs @ p["w1"] + p["b1"])
+    px = jnp.tanh(px @ p["w2"] + p["b2"])
+    mean = px @ p["w_mean"] + p["b_mean"]
+    log_std = p["log_std"]
+
+    v = params["value"]
+    vx = jnp.tanh(obs @ v["w1"] + v["b1"])
+    vx = jnp.tanh(vx @ v["w2"] + v["b2"])
+    value = vx @ v["w_out"] + v["b_out"]
+    value = value.squeeze(-1)
+
+    return mean, log_std, value
+
+
+def gaussian_log_prob(action, mean, log_std):
+    std = jnp.exp(log_std)
+    return -0.5 * jnp.sum(
+        ((action - mean) / std) ** 2 + 2.0 * log_std + jnp.log(2.0 * jnp.pi),
+        axis=-1,
+    )
+
+
+def select_action(params, obs, rng, deterministic=False):
+    mean, log_std, value = mlp_forward(params, obs)
+    log_std = jnp.clip(log_std, -4.0, 1.0)
+
+    if deterministic:
+        action = jnp.clip(mean, -1.0, 1.0)
+        log_prob = gaussian_log_prob(action, mean, log_std)
+        return action, log_prob, value
+
+    std = jnp.exp(log_std)
+    noise = jax.random.normal(rng, mean.shape)
+    action = mean + std * noise
+    action = jnp.clip(action, -1.0, 1.0)
+    log_prob = gaussian_log_prob(action, mean, log_std)
+    return action, log_prob, value
+
+
+def compute_gae(rewards, values, dones, last_value, gamma=0.99, lam=0.95):
+    advantages = []
+    gae = 0.0
+    next_value = last_value
+
+    for t in reversed(range(len(rewards))):
+        nonterminal = 1.0 - dones[t]
+        delta = rewards[t] + gamma * next_value * nonterminal - values[t]
+        gae = delta + gamma * lam * nonterminal * gae
+        advantages.insert(0, gae)
+        next_value = values[t]
+
+    advantages = jnp.array(advantages, dtype=jnp.float32)
+    returns = advantages + jnp.array(values, dtype=jnp.float32)
+    return advantages, returns
+
+
+def ppo_loss(
+    params,
+    obs,
+    actions,
+    old_log_probs,
+    advantages,
+    returns,
+    clip_eps=0.2,
+    value_coef=0.5,
+    entropy_coef=0.01,
+):
+    mean, log_std, values = mlp_forward(params, obs)
+    log_std = jnp.clip(log_std, -4.0, 1.0)
+
+    log_probs = gaussian_log_prob(actions, mean, log_std)
+    ratio = jnp.exp(log_probs - old_log_probs)
+    clipped_ratio = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
+
+    policy_loss = -jnp.mean(jnp.minimum(ratio * advantages, clipped_ratio * advantages))
+    value_loss = jnp.mean((returns - values) ** 2)
+
+    std = jnp.exp(log_std)
+    entropy = jnp.mean(
+        0.5 * jnp.sum(jnp.log(2.0 * jnp.pi * jnp.e * (std ** 2)), axis=-1)
+    )
+
+    total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
+    return total_loss
+
+
+# =========================================================
+# Metrics helpers
+# =========================================================
+def empty_episode_counters():
+    return {
+        "collision_count": 0.0,
+        "oob_count": 0.0,
+        "speed_count": 0.0,
+        "fall_count": 0.0,
+        "total_violations": 0.0,
+        "time_to_failure": np.nan,
+        "failed": 0.0,
+    }
+
+
+def update_episode_counters(counters, metrics, current_step):
+    collision = float(metrics["collision"][0])
+    oob = float(metrics["out_of_bounds"][0])
+    speed = float(metrics["speed_violation"][0])
+    fall = float(metrics["fall"][0])
+
+    counters["collision_count"] += collision
+    counters["oob_count"] += oob
+    counters["speed_count"] += speed
+    counters["fall_count"] += fall
+
+    violation_now = collision + oob + speed + fall
+    counters["total_violations"] += violation_now
+
+    if np.isnan(counters["time_to_failure"]) and violation_now > 0.0:
+        counters["time_to_failure"] = float(current_step)
+        counters["failed"] = 1.0
+
+    return counters
+
+
+# =========================================================
+# Evaluation and rollout helpers
+# =========================================================
+def evaluate_model(
+    params,
+    model_name: str,
+    cfg: Cfg,
+    n_episodes=100,
+    seed=123,
+):
+    env_cls = get_env_class(model_name)
+
+    successes = []
+    episode_lengths = []
+    episode_rewards = []
+
+    collisions_per_episode = []
+    oob_per_episode = []
+    speed_per_episode = []
+    fall_per_episode = []
+    total_violations_per_episode = []
+
+    violations_per_100_steps_list = []
+    time_to_failure_list = []
+    final_distances = []
+    min_margin_list = []
+
+    for ep in range(n_episodes):
+        ep_cfg = Cfg(**cfg.__dict__)
+        ep_cfg.num_envs = 1
+
+        env = env_cls(ep_cfg)
+        rng_key = jax.random.PRNGKey(seed + ep)
+        obs, _ = env.reset(rng_key)
+
+        done = np.array([False])
+        ep_reward = 0.0
+        last_metrics = None
+
+        counters = empty_episode_counters()
+        act_key = jax.random.PRNGKey(seed + ep + 100_000)
+
+        while not bool(done[0]):
+            act_key, subkey = jax.random.split(act_key)
+            action, _, _ = select_action(
+                params=params,
+                obs=obs,
+                rng=subkey,
+                deterministic=True,
+            )
+
+            obs, reward, done, metrics = env.step(np.array(action))
+            ep_reward += float(np.array(reward)[0])
+            last_metrics = metrics
+
+            current_step = int(metrics["steps"][0])
+            counters = update_episode_counters(counters, metrics, current_step)
+
+        ep_len = float(last_metrics["steps"][0])
+        successes.append(float(last_metrics["success"][0]))
+        episode_lengths.append(ep_len)
+        episode_rewards.append(float(ep_reward))
+
+        collisions_per_episode.append(counters["collision_count"])
+        oob_per_episode.append(counters["oob_count"])
+        speed_per_episode.append(counters["speed_count"])
+        fall_per_episode.append(counters["fall_count"])
+        total_violations_per_episode.append(counters["total_violations"])
+
+        if ep_len > 0:
+            violations_per_100_steps_list.append(100.0 * counters["total_violations"] / ep_len)
+        else:
+            violations_per_100_steps_list.append(0.0)
+
+        time_to_failure_list.append(counters["time_to_failure"])
+        final_distances.append(float(last_metrics["dist_to_goal"][0]))
+        min_margin_list.append(float(last_metrics["min_margin"][0]))
+
+    # Average only over episodes that actually failed
+    valid_ttf = [x for x in time_to_failure_list if not np.isnan(x)]
+    avg_time_to_failure = float(np.mean(valid_ttf)) if valid_ttf else None
+
+    return {
+        "episodes": int(n_episodes),
+        "success_rate": float(np.mean(successes)),
+        "mean_episode_length": float(np.mean(episode_lengths)),
+        "avg_episode_reward": float(np.mean(episode_rewards)),
+        "violations_per_100_steps": float(np.mean(violations_per_100_steps_list)),
+        "avg_time_to_failure": avg_time_to_failure,
+        "failure_rate": float(np.mean([0.0 if np.isnan(x) else 1.0 for x in time_to_failure_list])),
+
+        "avg_collisions_per_episode": float(np.mean(collisions_per_episode)),
+        "avg_oob_per_episode": float(np.mean(oob_per_episode)),
+        "avg_speed_violations_per_episode": float(np.mean(speed_per_episode)),
+        "avg_falls_per_episode": float(np.mean(fall_per_episode)),
+        "avg_total_violations_per_episode": float(np.mean(total_violations_per_episode)),
+
+        # optional extra metrics
+        "avg_final_dist_to_goal": float(np.mean(final_distances)),
+        "avg_min_margin": float(np.mean(min_margin_list)),
+    }
+
+
+def rollout_episode(
+    params,
+    model_name: str,
+    cfg: Cfg,
+    seed: int,
+):
+    env_cls = get_env_class(model_name)
+    roll_cfg = Cfg(**cfg.__dict__)
+    roll_cfg.num_envs = 1
+
+    env = env_cls(roll_cfg)
+    rng_key = jax.random.PRNGKey(seed)
+    obs, _ = env.reset(rng_key)
+
+    done = np.array([False])
+    last_metrics = None
+    total_reward = 0.0
+
+    act_key = jax.random.PRNGKey(seed + 999_999)
+
+    traj_xy = [env.torso_xy_t[0].copy()]
+    goal_xy = env.goal[0].copy()
+    obs_xy = env.obs_xy[0].copy()
+    obs_r = env.obs_r[0].copy()
+
+    counters = empty_episode_counters()
+
+    while not bool(done[0]):
+        act_key, subkey = jax.random.split(act_key)
+        action, _, _ = select_action(
+            params=params,
+            obs=obs,
+            rng=subkey,
+            deterministic=True,
+        )
+
+        obs, reward, done, metrics = env.step(np.array(action))
+        total_reward += float(np.array(reward)[0])
+        last_metrics = metrics
+
+        current_step = int(metrics["steps"][0])
+        counters = update_episode_counters(counters, metrics, current_step)
+
+        traj_xy.append(env.torso_xy_t[0].copy())
+
+    traj_xy = np.array(traj_xy, dtype=np.float32)
+    ep_len = float(last_metrics["steps"][0])
+    violations_per_100_steps = (
+        100.0 * counters["total_violations"] / ep_len if ep_len > 0 else 0.0
+    )
+
+    rollout_metrics = {
+        "success": float(last_metrics["success"][0]),
+        "episode_length": ep_len,
+        "dist_to_goal": float(last_metrics["dist_to_goal"][0]),
+        "min_margin": float(last_metrics["min_margin"][0]),
+        "episode_reward": float(total_reward),
+
+        "collision_count": float(counters["collision_count"]),
+        "oob_count": float(counters["oob_count"]),
+        "speed_count": float(counters["speed_count"]),
+        "fall_count": float(counters["fall_count"]),
+        "total_violations": float(counters["total_violations"]),
+        "violations_per_100_steps": float(violations_per_100_steps),
+        "time_to_failure": None if np.isnan(counters["time_to_failure"]) else float(counters["time_to_failure"]),
+    }
+
+    return {
+        "traj_xy": traj_xy,
+        "goal_xy": goal_xy,
+        "obs_xy": obs_xy,
+        "obs_r": obs_r,
+        "metrics": rollout_metrics,
+    }
+
+
+def save_rollout_plot(rollout_data, cfg: Cfg, model_name: str, seed: int, out_png_path):
+    traj = rollout_data["traj_xy"]
+    goal_xy = rollout_data["goal_xy"]
+    obs_xy = rollout_data["obs_xy"]
+    obs_r = rollout_data["obs_r"]
+    m = rollout_data["metrics"]
+
+    plt.figure(figsize=(8, 8))
+    plt.plot(traj[:, 0], traj[:, 1], linewidth=2, label="trajectory")
+    plt.scatter(traj[0, 0], traj[0, 1], marker="s", s=140, label="start")
+    plt.scatter(goal_xy[0], goal_xy[1], marker="*", s=420, label="goal")
+
+    end_point = traj[-1]
+    plt.scatter(
+        end_point[0],
+        end_point[1],
+        c="red",
+        s=100,
+        marker="o",
+        label="end",
+        zorder=5,
+    )
+
+    for (cx, cy), r in zip(obs_xy, obs_r):
+        body_circle = plt.Circle(
+            (float(cx), float(cy)),
+            float(r),
+            fill=False,
+            linewidth=2,
+        )
+        plt.gca().add_patch(body_circle)
+
+        buffer_circle = plt.Circle(
+            (float(cx), float(cy)),
+            float(r + cfg.agent_r + cfg.buffer_dist),
+            fill=False,
+            linestyle="--",
+            linewidth=1.5,
+        )
+        plt.gca().add_patch(buffer_circle)
+
+    plt.title(
+        f"Rollout {model_name} | seed={seed} | "
+        f"success={int(m['success'])} | "
+        f"viol/100={m['violations_per_100_steps']:.2f} | "
+        f"coll={m['collision_count']:.0f} | "
+        f"oob={m['oob_count']:.0f} | "
+        f"speed={m['speed_count']:.0f} | "
+        f"fall={m['fall_count']:.0f}"
+    )
+
+    a = cfg.arena_size
+    plt.xlim(-a - 1.0, a + 1.0)
+    plt.ylim(-a - 1.0, a + 1.0)
+    plt.gca().set_aspect("equal")
+    plt.grid(True, linestyle="--", alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_png_path, dpi=160)
+    plt.close()
+
+
+# =========================================================
+# Plot helpers
+# =========================================================
+def model_metrics_for_plot():
+    return [
+        "success_rate",
+        "mean_episode_length",
+        "avg_episode_reward",
+        "violations_per_100_steps",
+        "avg_time_to_failure",
+        "avg_collisions_per_episode",
+        "avg_total_violations_per_episode",
+        "avg_final_dist_to_goal",
+        "avg_min_margin",
+    ]
+
+
+def plot_learning_curve(curve_csv_path, model_name, out_png_path):
+    df = pd.read_csv(curve_csv_path)
+    metrics = model_metrics_for_plot()
+
+    plt.figure(figsize=(14, 8))
+    for metric in metrics:
+        if metric in df.columns:
+            plt.plot(df["timesteps"], df[metric], marker="o", label=metric)
+
+    plt.xlabel("Timesteps")
+    plt.ylabel("Value")
+    plt.title(f"Learning Curve ({model_name})")
+    plt.grid(True, linestyle="--", alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_png_path, dpi=160)
+    plt.close()
+
+
+def aggregate_learning_curves(curve_paths, model_name, out_csv_path, out_png_path):
+    if not curve_paths:
+        return
+
+    frames = [pd.read_csv(p) for p in curve_paths]
+    min_len = min(len(df) for df in frames)
+    frames = [df.iloc[:min_len].reset_index(drop=True) for df in frames]
+    base_timesteps = frames[0]["timesteps"].to_numpy()
+
+    all_metrics = [
+        "success_rate",
+        "mean_episode_length",
+        "avg_episode_reward",
+        "violations_per_100_steps",
+        "avg_time_to_failure",
+        "failure_rate",
+        "avg_collisions_per_episode",
+        "avg_oob_per_episode",
+        "avg_speed_violations_per_episode",
+        "avg_falls_per_episode",
+        "avg_total_violations_per_episode",
+        "avg_final_dist_to_goal",
+        "avg_min_margin",
+    ]
+
+    rows = []
+    for i, t in enumerate(base_timesteps):
+        row = {"timesteps": int(t)}
+        for metric in all_metrics:
+            vals = []
+            for df in frames:
+                if metric in df.columns:
+                    v = df.loc[i, metric]
+                    if pd.notna(v):
+                        vals.append(float(v))
+            if vals:
+                row[f"{metric}_mean"] = float(np.mean(vals))
+                row[f"{metric}_std"] = float(np.std(vals))
+        rows.append(row)
+
+    save_dict_rows_to_csv(rows, out_csv_path)
+
+    df_agg = pd.DataFrame(rows)
+    metrics = model_metrics_for_plot()
+
+    plt.figure(figsize=(14, 8))
+    for metric in metrics:
+        mean_col = f"{metric}_mean"
+        std_col = f"{metric}_std"
+        if mean_col not in df_agg.columns:
+            continue
+
+        x = df_agg["timesteps"].to_numpy()
+        y = df_agg[mean_col].to_numpy()
+        s = df_agg[std_col].to_numpy()
+
+        plt.plot(x, y, marker="o", label=f"{metric} (mean)")
+        plt.fill_between(x, y - s, y + s, alpha=0.18)
+
+    plt.xlabel("Timesteps")
+    plt.ylabel("Value")
+    plt.title(f"Aggregated Learning Curve ({model_name}) - mean ± std over seeds")
+    plt.grid(True, linestyle="--", alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_png_path, dpi=160)
+    plt.close()
+
+
+def plot_metrics_vs_seed(final_rows, model_name, out_png_path):
+    if not final_rows:
+        return
+
+    rows = sorted(final_rows, key=lambda x: x["seed"])
+    seeds = [r["seed"] for r in rows]
+
+    plt.figure(figsize=(12, 7))
+    plt.plot(seeds, [r["success_rate"] for r in rows], marker="o", label="success_rate")
+    plt.plot(seeds, [r["violations_per_100_steps"] for r in rows], marker="o", label="violations_per_100_steps")
+    plt.plot(seeds, [r["avg_collisions_per_episode"] for r in rows], marker="o", label="avg_collisions_per_episode")
+    plt.plot(seeds, [r["mean_episode_length"] for r in rows], marker="o", label="mean_episode_length")
+    plt.plot(seeds, [r["avg_episode_reward"] for r in rows], marker="o", label="avg_episode_reward")
+
+    plt.xlabel("Seed")
+    plt.ylabel("Value")
+    plt.title(f"Performance vs Seed ({model_name})")
+    plt.grid(True, linestyle="--", alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_png_path, dpi=160)
+    plt.close()
+
+
+# =========================================================
+# PPO rollout collection
+# =========================================================
+def collect_rollout(env, params, rng, steps_per_env):
+    obs_buf = []
+    act_buf = []
+    rew_buf = []
+    done_buf = []
+    logp_buf = []
+    val_buf = []
+
+    obs = env._obs()
+    num_envs = env.cfg.num_envs
+    done_mask = np.zeros((num_envs,), dtype=bool)
+
+    for _ in range(steps_per_env):
+        rng, subkey = jax.random.split(rng)
+
+        action, log_prob, value = select_action(
+            params=params,
+            obs=obs,
+            rng=subkey,
+            deterministic=False,
+        )
+
+        action_np = np.array(action, dtype=np.float32)
+        action_np[done_mask] = 0.0
+
+        next_obs, reward, done, _metrics = env.step(action_np)
+
+        reward_np = np.array(reward, dtype=np.float32)
+        done_np = np.array(done, dtype=bool)
+
+        reward_np[done_mask] = 0.0
+        done_np = np.logical_or(done_np, done_mask)
+
+        obs_buf.append(jnp.nan_to_num(obs))
+        act_buf.append(jnp.nan_to_num(jnp.asarray(action_np)))
+        rew_buf.append(jnp.nan_to_num(jnp.asarray(reward_np)))
+        done_buf.append(jnp.asarray(done_np, dtype=jnp.float32))
+        logp_buf.append(jnp.nan_to_num(log_prob))
+        val_buf.append(jnp.nan_to_num(value))
+
+        done_mask = np.logical_or(done_mask, done_np)
+        obs = next_obs
+
+    _, _, last_values = mlp_forward(params, obs)
+    last_values = jnp.nan_to_num(last_values)
+
+    rollout = {
+        "obs": jnp.stack(obs_buf, axis=0),
+        "actions": jnp.stack(act_buf, axis=0),
+        "rewards": jnp.stack(rew_buf, axis=0),
+        "dones": jnp.stack(done_buf, axis=0),
+        "logp": jnp.stack(logp_buf, axis=0),
+        "values": jnp.stack(val_buf, axis=0),
+        "last_values": last_values,
+        "rng": rng,
+    }
+    return rollout
+
+
+def flatten_rollout_for_ppo(rollout, gamma, lam):
+    rewards = rollout["rewards"]
+    values = rollout["values"]
+    dones = rollout["dones"]
+    last_values = rollout["last_values"]
+
+    T, N = rewards.shape
+
+    all_adv = []
+    all_ret = []
+
+    for env_i in range(N):
+        adv_i, ret_i = compute_gae(
+            rewards[:, env_i],
+            values[:, env_i],
+            dones[:, env_i],
+            last_value=last_values[env_i],
+            gamma=gamma,
+            lam=lam,
+        )
+        all_adv.append(adv_i)
+        all_ret.append(ret_i)
+
+    adv = jnp.concatenate(all_adv, axis=0)
+    ret = jnp.concatenate(all_ret, axis=0)
+
+    obs_arr = rollout["obs"].reshape(T * N, -1)
+    act_arr = rollout["actions"].reshape(T * N, -1)
+    logp_arr = rollout["logp"].reshape(T * N)
+
+    adv = jnp.nan_to_num(adv)
+    ret = jnp.nan_to_num(ret)
+    obs_arr = jnp.nan_to_num(obs_arr)
+    act_arr = jnp.nan_to_num(act_arr)
+    logp_arr = jnp.nan_to_num(logp_arr)
+
+    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+    return obs_arr, act_arr, logp_arr, adv, ret
+
+
+def ppo_update(params, opt_state, optimizer, obs_arr, act_arr, logp_arr, adv, ret, rng, args):
+    batch_size = obs_arr.shape[0]
+    minibatch_size = min(args.minibatch_size, batch_size)
+
+    for _ in range(args.ppo_epochs):
+        rng, perm_key = jax.random.split(rng)
+        perm = np.array(jax.random.permutation(perm_key, batch_size))
+
+        for start in range(0, batch_size, minibatch_size):
+            idx = perm[start:start + minibatch_size]
+
+            mb_obs = obs_arr[idx]
+            mb_act = act_arr[idx]
+            mb_logp = logp_arr[idx]
+            mb_adv = adv[idx]
+            mb_ret = ret[idx]
+
+            loss_fn = lambda p: ppo_loss(
+                params=p,
+                obs=mb_obs,
+                actions=mb_act,
+                old_log_probs=mb_logp,
+                advantages=mb_adv,
+                returns=mb_ret,
+                clip_eps=args.clip_eps,
+                value_coef=args.value_coef,
+                entropy_coef=args.entropy_coef,
+            )
+
+            loss, grads = jax.value_and_grad(loss_fn)(params)
+
+            if not np.isfinite(float(loss)):
+                continue
+
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+
+    return params, opt_state, rng
+
+
+# =========================================================
+# Training per seed
+# =========================================================
+def run_single_seed(model_name, seed, args, model_budget_dir, cfg):
+    seed_dir = model_budget_dir / f"seed_{seed}"
+
+    model_dir = seed_dir / "model"
+    curves_dir = seed_dir / "curves"
+    eval_dir = seed_dir / "eval"
+    rollouts_dir = seed_dir / "rollouts"
+
+    for d in [model_dir, curves_dir, eval_dir, rollouts_dir]:
+        ensure_dir(d)
+
+    print("\n" + "=" * 80, flush=True)
+    print(f"[{model_name}] Starting seed {seed}", flush=True)
+    print("=" * 80, flush=True)
+
+    env_cls = get_env_class(model_name)
+    env = env_cls(cfg)
+
+    init_rng = jax.random.PRNGKey(seed)
+    params = init_mlp_params(
+        rng=init_rng,
+        obs_dim=env.total_obs_size(),
+        action_dim=env.act_size,
+        hidden_dim=args.hidden_dim,
+    )
+
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(args.max_grad_norm),
+        optax.adam(args.learning_rate),
+    )
+    opt_state = optimizer.init(params)
+
+    config_to_save = {
+        "model_name": model_name,
+        "seed": seed,
+        "timesteps": args.timesteps,
+        "steps_per_env": args.steps_per_env,
+        "num_envs": cfg.num_envs,
+        "ppo_epochs": args.ppo_epochs,
+        "minibatch_size": args.minibatch_size,
+        "hidden_dim": args.hidden_dim,
+        "learning_rate": args.learning_rate,
+        "gamma": args.gamma,
+        "gae_lambda": args.gae_lambda,
+        "clip_eps": args.clip_eps,
+        "value_coef": args.value_coef,
+        "entropy_coef": args.entropy_coef,
+        "max_grad_norm": args.max_grad_norm,
+        "cfg": cfg.__dict__,
+    }
+    save_dict_to_json(config_to_save, model_dir / "config.json")
+
+    steps_per_iter = args.steps_per_env * cfg.num_envs
+    num_iters = max(1, args.timesteps // steps_per_iter)
+
+    curve_records = []
+    rng = jax.random.PRNGKey(seed + 1234)
+
+    for it in range(1, num_iters + 1):
+        rng, reset_key = jax.random.split(rng)
+        env.reset(reset_key)
+
+        rollout = collect_rollout(
+            env=env,
+            params=params,
+            rng=rng,
+            steps_per_env=args.steps_per_env,
+        )
+        rng = rollout["rng"]
+
+        obs_arr, act_arr, logp_arr, adv, ret = flatten_rollout_for_ppo(
+            rollout=rollout,
+            gamma=args.gamma,
+            lam=args.gae_lambda,
+        )
+
+        params, opt_state, rng = ppo_update(
+            params=params,
+            opt_state=opt_state,
+            optimizer=optimizer,
+            obs_arr=obs_arr,
+            act_arr=act_arr,
+            logp_arr=logp_arr,
+            adv=adv,
+            ret=ret,
+            rng=rng,
+            args=args,
+        )
+
+        current_timesteps = int(it * steps_per_iter)
+
+        if (it % args.eval_every_iters == 0) or (it == num_iters):
+            stats = evaluate_model(
+                params=params,
+                model_name=model_name,
+                cfg=cfg,
+                n_episodes=args.eval_eps,
+                seed=seed * 1000 + current_timesteps,
+            )
+
+            row = {"timesteps": current_timesteps}
+            row.update(stats)
+            curve_records.append(row)
+
+            print(
+                f"[Eval {model_name}] "
+                f"seed={seed} | "
+                f"iter={it}/{num_iters} | "
+                f"t={current_timesteps} | "
+                f"success={row['success_rate']:.3f} | "
+                f"len={row['mean_episode_length']:.1f} | "
+                f"viol/100={row['violations_per_100_steps']:.3f} | "
+                f"coll/ep={row['avg_collisions_per_episode']:.3f} | "
+                f"reward={row['avg_episode_reward']:.3f} | "
+                f"ttf={row['avg_time_to_failure']}",
+                flush=True,
+            )
+
+    latest_model_path = model_dir / "latest_model.pkl"
+    save_params(params, latest_model_path)
+
+    curve_csv_path = curves_dir / "learning_curve.csv"
+    curve_png_path = curves_dir / "learning_curve.png"
+    save_dict_rows_to_csv(curve_records, curve_csv_path)
+    plot_learning_curve(curve_csv_path, model_name, curve_png_path)
+
+    final_stats = evaluate_model(
+        params=params,
+        model_name=model_name,
+        cfg=cfg,
+        n_episodes=args.final_eval_eps,
+        seed=10_000 + seed,
+    )
+
+    final_stats_with_seed = {"seed": seed}
+    final_stats_with_seed.update(final_stats)
+
+    save_dict_rows_to_csv([final_stats_with_seed], eval_dir / "final_eval.csv")
+    save_dict_to_json(final_stats_with_seed, eval_dir / "final_eval.json")
+
+    print(f"[{model_name}] Seed {seed} final stats: {final_stats}", flush=True)
+
+    rollout_rows = []
+
+    for k in range(args.rollouts_per_seed):
+        rollout_seed = seed * 1000 + k
+        rollout_data = rollout_episode(
+            params=params,
+            model_name=model_name,
+            cfg=cfg,
+            seed=rollout_seed,
+        )
+
+        rollout_png_path = rollouts_dir / f"rollout_{k}.png"
+        save_rollout_plot(
+            rollout_data=rollout_data,
+            cfg=cfg,
+            model_name=model_name,
+            seed=rollout_seed,
+            out_png_path=rollout_png_path,
+        )
+
+        traj = rollout_data["traj_xy"]
+        traj_rows = [{"x": float(p[0]), "y": float(p[1])} for p in traj]
+        save_dict_rows_to_csv(traj_rows, rollouts_dir / f"rollout_{k}_trajectory.csv")
+
+        row = {"rollout_id": k, "seed": rollout_seed}
+        row.update(rollout_data["metrics"])
+        rollout_rows.append(row)
+
+    save_dict_rows_to_csv(rollout_rows, rollouts_dir / "rollout_metrics.csv")
+
+    return final_stats_with_seed
+
+
+# =========================================================
+# Aggregation per model
+# =========================================================
+def aggregate_model_results(model_name, model_budget_dir, seeds):
+    aggregated_dir = model_budget_dir / "aggregated"
+    ensure_dir(aggregated_dir)
+
+    all_seed_rows = []
+    for seed in seeds:
+        eval_csv_path = model_budget_dir / f"seed_{seed}" / "eval" / "final_eval.csv"
+        if eval_csv_path.exists():
+            rows = pd.read_csv(eval_csv_path).to_dict(orient="records")
+            all_seed_rows.extend(rows)
+
+    if not all_seed_rows:
+        return
+
+    save_dict_rows_to_csv(all_seed_rows, aggregated_dir / "all_seed_eval.csv")
+
+    metrics = [
+        "success_rate",
+        "mean_episode_length",
+        "avg_episode_reward",
+        "violations_per_100_steps",
+        "avg_time_to_failure",
+        "failure_rate",
+        "avg_collisions_per_episode",
+        "avg_oob_per_episode",
+        "avg_speed_violations_per_episode",
+        "avg_falls_per_episode",
+        "avg_total_violations_per_episode",
+        "avg_final_dist_to_goal",
+        "avg_min_margin",
+    ]
+
+    df = pd.DataFrame(all_seed_rows)
+    final_table = []
+
+    for metric in metrics:
+        if metric not in df.columns:
+            continue
+        final_table.append(
+            {
+                "metric": metric,
+                "mean": float(df[metric].dropna().mean()),
+                "std": float(df[metric].dropna().std(ddof=0)) if len(df[metric].dropna()) > 0 else 0.0,
+            }
+        )
+
+    save_dict_rows_to_csv(final_table, aggregated_dir / "final_table.csv")
+
+    curve_paths = []
+    for seed in seeds:
+        p = model_budget_dir / f"seed_{seed}" / "curves" / "learning_curve.csv"
+        if p.exists():
+            curve_paths.append(p)
+
+    if curve_paths:
+        aggregate_learning_curves(
+            curve_paths=curve_paths,
+            model_name=model_name,
+            out_csv_path=aggregated_dir / "mean_learning_curve.csv",
+            out_png_path=aggregated_dir / "mean_learning_curve.png",
+        )
+
+    plot_metrics_vs_seed(
+        final_rows=all_seed_rows,
+        model_name=model_name,
+        out_png_path=aggregated_dir / "metrics_vs_seed.png",
+    )
+
+
+# =========================================================
+# CLI
+# =========================================================
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--timesteps", type=int, default=200_000)
+    parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
+    parser.add_argument("--results_root", type=str, default="Results")
+
+    parser.add_argument("--steps_per_env", type=int, default=512)
+    parser.add_argument("--ppo_epochs", type=int, default=8)
+    parser.add_argument("--minibatch_size", type=int, default=1024)
+    parser.add_argument("--hidden_dim", type=int, default=256)
+
+    parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--gae_lambda", type=float, default=0.95)
+    parser.add_argument("--clip_eps", type=float, default=0.2)
+    parser.add_argument("--value_coef", type=float, default=0.5)
+    parser.add_argument("--entropy_coef", type=float, default=0.01)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+
+    parser.add_argument("--eval_every_iters", type=int, default=2)
+    parser.add_argument("--eval_eps", type=int, default=50)
+    parser.add_argument("--final_eval_eps", type=int, default=200)
+    parser.add_argument("--rollouts_per_seed", type=int, default=3)
+
+    parser.add_argument("--num_envs", type=int, default=16)
+    parser.add_argument("--max_steps", type=int, default=300)
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    cfg = Cfg(
+        num_envs=args.num_envs,
+        max_steps=args.max_steps,
+    )
+
+    budget_tag = format_budget_tag(args.timesteps)
+    budget_dir = Path(args.results_root) / budget_tag
+    ensure_dir(budget_dir)
+
+    print("\n" + "#" * 90, flush=True)
+    print("Training configuration", flush=True)
+    print(f"timesteps          : {args.timesteps}", flush=True)
+    print(f"budget_tag         : {budget_tag}", flush=True)
+    print(f"seeds              : {args.seeds}", flush=True)
+    print(f"num_envs           : {args.num_envs}", flush=True)
+    print(f"max_steps          : {args.max_steps}", flush=True)
+    print(f"steps_per_env      : {args.steps_per_env}", flush=True)
+    print(f"ppo_epochs         : {args.ppo_epochs}", flush=True)
+    print(f"minibatch_size     : {args.minibatch_size}", flush=True)
+    print(f"hidden_dim         : {args.hidden_dim}", flush=True)
+    print(f"eval_eps           : {args.eval_eps}", flush=True)
+    print(f"final_eval_eps     : {args.final_eval_eps}", flush=True)
+    print(f"rollouts_per_seed  : {args.rollouts_per_seed}", flush=True)
+    print(f"results_root       : {args.results_root}", flush=True)
+    print("#" * 90 + "\n", flush=True)
+
+    for model_name in ENV_NAME_ORDER:
+        print("\n" + "#" * 90, flush=True)
+        print(f"Starting model family: {model_name}", flush=True)
+        print("#" * 90 + "\n", flush=True)
+
+        model_budget_dir = budget_dir / model_name
+        ensure_dir(model_budget_dir)
+
+        for seed in args.seeds:
+            run_single_seed(
+                model_name=model_name,
+                seed=seed,
+                args=args,
+                model_budget_dir=model_budget_dir,
+                cfg=cfg,
+            )
+
+        aggregate_model_results(
+            model_name=model_name,
+            model_budget_dir=model_budget_dir,
+            seeds=args.seeds,
+        )
+
+    print("\nAll training runs completed successfully.", flush=True)
+    print(f"Results available in: {budget_dir}", flush=True)
+
+
+if __name__ == "__main__":
+    main()
