@@ -2,7 +2,7 @@
 # =========================================================
 # End-to-end training script for the CSI4900 Brax project.
 #
-# This version aligns the evaluation with the professor request:
+# Main choices in this version:
 #   - same violation types for soft and hard:
 #       * collision
 #       * out_of_bounds
@@ -13,13 +13,17 @@
 #       * soft_constraint: penalties only
 #       * hard_constraint: penalties + immediate termination
 #
-# Main reported metrics:
+# Main reported metrics / main plots:
 #   - violations_per_100_steps
 #   - success_rate
 #   - avg_time_to_failure
 #   - mean_episode_length
 #   - avg_collisions_per_episode
 #   - avg_episode_reward
+#
+# Learning curves:
+#   - x-axis = iteration
+#   - timesteps are still stored in CSV for reference
 # =========================================================
 
 import csv
@@ -285,8 +289,6 @@ def evaluate_model(
 
     violations_per_100_steps_list = []
     time_to_failure_list = []
-    final_distances = []
-    min_margin_list = []
 
     for ep in range(n_episodes):
         ep_cfg = Cfg(**cfg.__dict__)
@@ -320,6 +322,7 @@ def evaluate_model(
             counters = update_episode_counters(counters, metrics, current_step)
 
         ep_len = float(last_metrics["steps"][0])
+
         successes.append(float(last_metrics["success"][0]))
         episode_lengths.append(ep_len)
         episode_rewards.append(float(ep_reward))
@@ -331,15 +334,14 @@ def evaluate_model(
         total_violations_per_episode.append(counters["total_violations"])
 
         if ep_len > 0:
-            violations_per_100_steps_list.append(100.0 * counters["total_violations"] / ep_len)
+            violations_per_100_steps_list.append(
+                100.0 * counters["total_violations"] / ep_len
+            )
         else:
             violations_per_100_steps_list.append(0.0)
 
         time_to_failure_list.append(counters["time_to_failure"])
-        final_distances.append(float(last_metrics["dist_to_goal"][0]))
-        min_margin_list.append(float(last_metrics["min_margin"][0]))
 
-    # Average only over episodes that actually failed
     valid_ttf = [x for x in time_to_failure_list if not np.isnan(x)]
     avg_time_to_failure = float(np.mean(valid_ttf)) if valid_ttf else None
 
@@ -350,17 +352,14 @@ def evaluate_model(
         "avg_episode_reward": float(np.mean(episode_rewards)),
         "violations_per_100_steps": float(np.mean(violations_per_100_steps_list)),
         "avg_time_to_failure": avg_time_to_failure,
-        "failure_rate": float(np.mean([0.0 if np.isnan(x) else 1.0 for x in time_to_failure_list])),
-
+        "failure_rate": float(
+            np.mean([0.0 if np.isnan(x) else 1.0 for x in time_to_failure_list])
+        ),
         "avg_collisions_per_episode": float(np.mean(collisions_per_episode)),
         "avg_oob_per_episode": float(np.mean(oob_per_episode)),
         "avg_speed_violations_per_episode": float(np.mean(speed_per_episode)),
         "avg_falls_per_episode": float(np.mean(fall_per_episode)),
         "avg_total_violations_per_episode": float(np.mean(total_violations_per_episode)),
-
-        # optional extra metrics
-        "avg_final_dist_to_goal": float(np.mean(final_distances)),
-        "avg_min_margin": float(np.mean(min_margin_list)),
     }
 
 
@@ -418,17 +417,17 @@ def rollout_episode(
     rollout_metrics = {
         "success": float(last_metrics["success"][0]),
         "episode_length": ep_len,
-        "dist_to_goal": float(last_metrics["dist_to_goal"][0]),
-        "min_margin": float(last_metrics["min_margin"][0]),
         "episode_reward": float(total_reward),
-
         "collision_count": float(counters["collision_count"]),
         "oob_count": float(counters["oob_count"]),
         "speed_count": float(counters["speed_count"]),
         "fall_count": float(counters["fall_count"]),
         "total_violations": float(counters["total_violations"]),
         "violations_per_100_steps": float(violations_per_100_steps),
-        "time_to_failure": None if np.isnan(counters["time_to_failure"]) else float(counters["time_to_failure"]),
+        "time_to_failure": (
+            None if np.isnan(counters["time_to_failure"])
+            else float(counters["time_to_failure"])
+        ),
     }
 
     return {
@@ -507,15 +506,12 @@ def save_rollout_plot(rollout_data, cfg: Cfg, model_name: str, seed: int, out_pn
 # =========================================================
 def model_metrics_for_plot():
     return [
-        "success_rate",
-        "mean_episode_length",
-        "avg_episode_reward",
         "violations_per_100_steps",
+        "success_rate",
         "avg_time_to_failure",
+        "mean_episode_length",
         "avg_collisions_per_episode",
-        "avg_total_violations_per_episode",
-        "avg_final_dist_to_goal",
-        "avg_min_margin",
+        "avg_episode_reward",
     ]
 
 
@@ -526,9 +522,10 @@ def plot_learning_curve(curve_csv_path, model_name, out_png_path):
     plt.figure(figsize=(14, 8))
     for metric in metrics:
         if metric in df.columns:
-            plt.plot(df["timesteps"], df[metric], marker="o", label=metric)
+            y = pd.to_numeric(df[metric], errors="coerce")
+            plt.plot(df["iteration"], y, marker="o", label=metric)
 
-    plt.xlabel("Timesteps")
+    plt.xlabel("Iteration")
     plt.ylabel("Value")
     plt.title(f"Learning Curve ({model_name})")
     plt.grid(True, linestyle="--", alpha=0.4)
@@ -545,37 +542,31 @@ def aggregate_learning_curves(curve_paths, model_name, out_csv_path, out_png_pat
     frames = [pd.read_csv(p) for p in curve_paths]
     min_len = min(len(df) for df in frames)
     frames = [df.iloc[:min_len].reset_index(drop=True) for df in frames]
-    base_timesteps = frames[0]["timesteps"].to_numpy()
 
-    all_metrics = [
-        "success_rate",
-        "mean_episode_length",
-        "avg_episode_reward",
-        "violations_per_100_steps",
-        "avg_time_to_failure",
-        "failure_rate",
-        "avg_collisions_per_episode",
-        "avg_oob_per_episode",
-        "avg_speed_violations_per_episode",
-        "avg_falls_per_episode",
-        "avg_total_violations_per_episode",
-        "avg_final_dist_to_goal",
-        "avg_min_margin",
-    ]
+    base_iterations = frames[0]["iteration"].to_numpy()
+    base_timesteps = frames[0]["timesteps"].to_numpy() if "timesteps" in frames[0].columns else None
+
+    all_metrics = model_metrics_for_plot()
 
     rows = []
-    for i, t in enumerate(base_timesteps):
-        row = {"timesteps": int(t)}
+    for i, it in enumerate(base_iterations):
+        row = {"iteration": int(it)}
+
+        if base_timesteps is not None:
+            row["timesteps"] = int(base_timesteps[i])
+
         for metric in all_metrics:
             vals = []
             for df in frames:
                 if metric in df.columns:
-                    v = df.loc[i, metric]
+                    v = pd.to_numeric(pd.Series([df.loc[i, metric]]), errors="coerce").iloc[0]
                     if pd.notna(v):
                         vals.append(float(v))
+
             if vals:
                 row[f"{metric}_mean"] = float(np.mean(vals))
                 row[f"{metric}_std"] = float(np.std(vals))
+
         rows.append(row)
 
     save_dict_rows_to_csv(rows, out_csv_path)
@@ -587,17 +578,18 @@ def aggregate_learning_curves(curve_paths, model_name, out_csv_path, out_png_pat
     for metric in metrics:
         mean_col = f"{metric}_mean"
         std_col = f"{metric}_std"
+
         if mean_col not in df_agg.columns:
             continue
 
-        x = df_agg["timesteps"].to_numpy()
+        x = df_agg["iteration"].to_numpy()
         y = df_agg[mean_col].to_numpy()
         s = df_agg[std_col].to_numpy()
 
         plt.plot(x, y, marker="o", label=f"{metric} (mean)")
         plt.fill_between(x, y - s, y + s, alpha=0.18)
 
-    plt.xlabel("Timesteps")
+    plt.xlabel("Iteration")
     plt.ylabel("Value")
     plt.title(f"Aggregated Learning Curve ({model_name}) - mean ± std over seeds")
     plt.grid(True, linestyle="--", alpha=0.4)
@@ -615,11 +607,48 @@ def plot_metrics_vs_seed(final_rows, model_name, out_png_path):
     seeds = [r["seed"] for r in rows]
 
     plt.figure(figsize=(12, 7))
-    plt.plot(seeds, [r["success_rate"] for r in rows], marker="o", label="success_rate")
-    plt.plot(seeds, [r["violations_per_100_steps"] for r in rows], marker="o", label="violations_per_100_steps")
-    plt.plot(seeds, [r["avg_collisions_per_episode"] for r in rows], marker="o", label="avg_collisions_per_episode")
-    plt.plot(seeds, [r["mean_episode_length"] for r in rows], marker="o", label="mean_episode_length")
-    plt.plot(seeds, [r["avg_episode_reward"] for r in rows], marker="o", label="avg_episode_reward")
+
+    if "success_rate" in rows[0]:
+        plt.plot(seeds, [r["success_rate"] for r in rows], marker="o", label="success_rate")
+
+    if "violations_per_100_steps" in rows[0]:
+        plt.plot(
+            seeds,
+            [r["violations_per_100_steps"] for r in rows],
+            marker="o",
+            label="violations_per_100_steps",
+        )
+
+    if "avg_collisions_per_episode" in rows[0]:
+        plt.plot(
+            seeds,
+            [r["avg_collisions_per_episode"] for r in rows],
+            marker="o",
+            label="avg_collisions_per_episode",
+        )
+
+    if "mean_episode_length" in rows[0]:
+        plt.plot(
+            seeds,
+            [r["mean_episode_length"] for r in rows],
+            marker="o",
+            label="mean_episode_length",
+        )
+
+    if "avg_episode_reward" in rows[0]:
+        plt.plot(
+            seeds,
+            [r["avg_episode_reward"] for r in rows],
+            marker="o",
+            label="avg_episode_reward",
+        )
+
+    if "avg_time_to_failure" in rows[0]:
+        ttf_vals = [
+            np.nan if r["avg_time_to_failure"] is None else r["avg_time_to_failure"]
+            for r in rows
+        ]
+        plt.plot(seeds, ttf_vals, marker="o", label="avg_time_to_failure")
 
     plt.xlabel("Seed")
     plt.ylabel("Value")
@@ -877,7 +906,10 @@ def run_single_seed(model_name, seed, args, model_budget_dir, cfg):
                 seed=seed * 1000 + current_timesteps,
             )
 
-            row = {"timesteps": current_timesteps}
+            row = {
+                "iteration": it,
+                "timesteps": current_timesteps,
+            }
             row.update(stats)
             curve_records.append(row)
 
@@ -972,19 +1004,12 @@ def aggregate_model_results(model_name, model_budget_dir, seeds):
     save_dict_rows_to_csv(all_seed_rows, aggregated_dir / "all_seed_eval.csv")
 
     metrics = [
-        "success_rate",
-        "mean_episode_length",
-        "avg_episode_reward",
         "violations_per_100_steps",
+        "success_rate",
         "avg_time_to_failure",
-        "failure_rate",
+        "mean_episode_length",
         "avg_collisions_per_episode",
-        "avg_oob_per_episode",
-        "avg_speed_violations_per_episode",
-        "avg_falls_per_episode",
-        "avg_total_violations_per_episode",
-        "avg_final_dist_to_goal",
-        "avg_min_margin",
+        "avg_episode_reward",
     ]
 
     df = pd.DataFrame(all_seed_rows)
@@ -993,11 +1018,16 @@ def aggregate_model_results(model_name, model_budget_dir, seeds):
     for metric in metrics:
         if metric not in df.columns:
             continue
+
+        series = pd.to_numeric(df[metric], errors="coerce").dropna()
+        if len(series) == 0:
+            continue
+
         final_table.append(
             {
                 "metric": metric,
-                "mean": float(df[metric].dropna().mean()),
-                "std": float(df[metric].dropna().std(ddof=0)) if len(df[metric].dropna()) > 0 else 0.0,
+                "mean": float(series.mean()),
+                "std": float(series.std(ddof=0)),
             }
         )
 

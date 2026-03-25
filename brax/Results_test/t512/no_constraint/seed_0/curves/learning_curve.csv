@@ -1,2 +1,2 @@
-timesteps,episodes,success_rate,mean_episode_length,avg_episode_reward,violations_per_100_steps,avg_time_to_failure,failure_rate,avg_collisions_per_episode,avg_oob_per_episode,avg_speed_violations_per_episode,avg_falls_per_episode,avg_total_violations_per_episode,avg_final_dist_to_goal,avg_min_margin
-512,5,0.0,200.0,-2.619617811590433,46.3,81.5,0.8,92.6,0.0,0.0,0.0,92.6,3.388966274261475,-0.2006294846534729
+iteration,timesteps,episodes,success_rate,mean_episode_length,avg_episode_reward,violations_per_100_steps,avg_time_to_failure,failure_rate,avg_collisions_per_episode,avg_oob_per_episode,avg_speed_violations_per_episode,avg_falls_per_episode,avg_total_violations_per_episode
+1,512,5,0.0,200.0,-2.619617811590433,46.3,81.5,0.8,92.6,0.0,0.0,0.0,92.6

@@ -11,7 +11,5 @@
   "avg_oob_per_episode": 0.0,
   "avg_speed_violations_per_episode": 0.0,
   "avg_falls_per_episode": 0.7,
-  "avg_total_violations_per_episode": 67.2,
-  "avg_final_dist_to_goal": 3.07046662569046,
-  "avg_min_margin": 0.3797506809234619
+  "avg_total_violations_per_episode": 67.2
 }
