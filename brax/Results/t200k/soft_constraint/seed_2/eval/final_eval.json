@@ -1,0 +1,15 @@
+{
+  "seed": 2,
+  "episodes": 200,
+  "success_rate": 0.03,
+  "mean_episode_length": 294.59,
+  "avg_episode_reward": -1581.576447769832,
+  "violations_per_100_steps": 26.10210546792644,
+  "avg_time_to_failure": 98.54166666666667,
+  "failure_rate": 0.6,
+  "avg_collisions_per_episode": 68.34,
+  "avg_oob_per_episode": 0.0,
+  "avg_speed_violations_per_episode": 0.2,
+  "avg_falls_per_episode": 8.49,
+  "avg_total_violations_per_episode": 77.03
+}
