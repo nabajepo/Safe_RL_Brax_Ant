@@ -1,2 +1,0 @@
-iteration,timesteps,violations_per_100_steps_mean,violations_per_100_steps_std,success_rate_mean,success_rate_std,mean_episode_length_mean,mean_episode_length_std,avg_collisions_per_episode_mean,avg_collisions_per_episode_std,avg_episode_reward_mean,avg_episode_reward_std
-1,512,0.0,0.0,0.0,0.0,200.0,0.0,0.0,0.0,-1.9828650861978527,0.0

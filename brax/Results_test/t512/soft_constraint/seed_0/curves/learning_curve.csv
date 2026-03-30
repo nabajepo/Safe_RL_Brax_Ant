@@ -1,2 +1,0 @@
-iteration,timesteps,episodes,success_rate,mean_episode_length,avg_episode_reward,violations_per_100_steps,avg_time_to_failure,failure_rate,avg_collisions_per_episode,avg_oob_per_episode,avg_speed_violations_per_episode,avg_falls_per_episode,avg_total_violations_per_episode
-1,512,5,0.0,200.0,-22.437001446634532,0.5,135.0,0.2,1.0,0.0,0.0,0.0,1.0

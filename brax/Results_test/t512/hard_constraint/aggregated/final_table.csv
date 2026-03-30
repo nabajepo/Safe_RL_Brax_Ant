@@ -1,7 +1,0 @@
-metric,mean,std
-violations_per_100_steps,0.81203007518797,0.0
-success_rate,0.0,0.0
-avg_time_to_failure,27.0,0.0
-mean_episode_length,165.4,0.0
-avg_collisions_per_episode,0.2,0.0
-avg_episode_reward,-5.771230735071003,0.0
