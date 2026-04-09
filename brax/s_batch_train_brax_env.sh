@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH --account=def-cbelling-ab
-#SBATCH --job-name=csi4900_brax
+#SBATCH --job-name=csi4900_brax_gpu
 #SBATCH --output=output_%j.txt
 #SBATCH --error=error_%j.txt
-#SBATCH --time=18:00:00
+#SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=16G
+#SBATCH --mem=32G
+#SBATCH --gres=gpu:1
 
 set -euo pipefail
 
@@ -15,22 +16,30 @@ CONTAINER="${PROJECT_DIR}/python_3.10.sif"
 cd "${PROJECT_DIR}"
 
 echo "============================================================"
-echo "Starting CSI4900 Brax job"
+echo "Starting CSI4900 Brax GPU job"
 echo "Project directory : ${PROJECT_DIR}"
 echo "Container         : ${CONTAINER}"
 echo "Job ID            : ${SLURM_JOB_ID}"
 echo "Node              : ${SLURMD_NODENAME}"
 echo "============================================================"
 
-module load apptainer
+module load apptainer/1.4.5
 
 apptainer exec \
     --cleanenv \
+    --nv \
     --bind "${PROJECT_DIR}:${PROJECT_DIR}" \
     "${CONTAINER}" \
     bash -lc "
         set -euo pipefail
         cd '${PROJECT_DIR}'
+
+        export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+        export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+        export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+        # JAX GPU memory: avoid overly aggressive preallocation if needed
+        export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 
         source .venv/bin/activate
 
@@ -38,14 +47,17 @@ apptainer exec \
         echo 'Checking imports...'
         python -c 'import jax, brax, optax, numpy, pandas, matplotlib; print(\"All imports OK\")'
 
+        echo 'JAX devices:'
+        python -c 'import jax; print(jax.devices())'
+
         echo 'Starting training...'
         python train_brax_env.py \
-          --timesteps 200000 \
+          --timesteps 2000000 \
           --seeds 0 1 2 3 4 \
           --results_root Results \
           --steps_per_env 512 \
           --ppo_epochs 8 \
-          --minibatch_size 1024 \
+          --minibatch_size 4096 \
           --hidden_dim 256 \
           --learning_rate 3e-4 \
           --gamma 0.99 \
@@ -54,11 +66,11 @@ apptainer exec \
           --value_coef 0.5 \
           --entropy_coef 0.01 \
           --max_grad_norm 1.0 \
-          --eval_every_iters 2 \
+          --eval_every_iters 5 \
           --eval_eps 50 \
           --final_eval_eps 200 \
           --rollouts_per_seed 3 \
-          --num_envs 16 \
+          --num_envs 128 \
           --max_steps 300
     "
 

@@ -2,28 +2,17 @@
 # =========================================================
 # End-to-end training script for the CSI4900 Brax project.
 #
-# Main choices in this version:
-#   - same violation types for soft and hard:
-#       * collision
-#       * out_of_bounds
-#       * speed_violation
-#       * fall
-#   - different handling:
-#       * no_constraint: no penalty, no early stop on violations
-#       * soft_constraint: penalties only
-#       * hard_constraint: penalties + immediate termination
+# This version:
+#   - keeps learning_curve.csv per seed
+#   - does NOT create per-seed learning curve PNGs
+#   - creates per-model learning_curves/*.png
+#       one PNG per metric, with one line per seed
+#   - sanitizes NaN / None before saving CSV/JSON
 #
-# Main reported metrics / main plots:
-#   - violations_per_100_steps
-#   - success_rate
-#   - avg_time_to_failure
-#   - mean_episode_length
-#   - avg_collisions_per_episode
-#   - avg_episode_reward
-#
-# Learning curves:
-#   - x-axis = iteration
-#   - timesteps are still stored in CSV for reference
+# Learning-curves-per-model:
+#   X axis = iteration
+#   Y axis = metric value
+#   One curve per seed
 # =========================================================
 
 import csv
@@ -32,6 +21,7 @@ import math
 import pickle
 import argparse
 from pathlib import Path
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -70,19 +60,127 @@ def format_budget_tag(timesteps: int) -> str:
     return f"t{timesteps}"
 
 
+def _is_missing(x: Any) -> bool:
+    if x is None:
+        return True
+    try:
+        return bool(pd.isna(x))
+    except Exception:
+        return False
+
+
+def sanitize_scalar(metric_name: str, value: Any, fallback_row: Dict[str, Any] | None = None) -> float:
+    """
+    Convert values to finite float and replace missing values.
+
+    Special rule:
+      - avg_time_to_failure -> mean_episode_length if missing
+    General rule:
+      - other missing values -> 0.0
+    """
+    if not _is_missing(value):
+        try:
+            v = float(value)
+            if np.isfinite(v):
+                return v
+        except Exception:
+            pass
+
+    if metric_name == "avg_time_to_failure":
+        if fallback_row is not None:
+            mel = fallback_row.get("mean_episode_length", 0.0)
+            if not _is_missing(mel):
+                try:
+                    mel_f = float(mel)
+                    if np.isfinite(mel_f):
+                        return mel_f
+                except Exception:
+                    pass
+        return 0.0
+
+    if metric_name == "mean_episode_length":
+        if fallback_row is not None:
+            ms = fallback_row.get("max_steps", 0.0)
+            if not _is_missing(ms):
+                try:
+                    ms_f = float(ms)
+                    if np.isfinite(ms_f):
+                        return ms_f
+                except Exception:
+                    pass
+        return 0.0
+
+    return 0.0
+
+
+def sanitize_record(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Sanitize one row before saving.
+    """
+    out = dict(row)
+
+    keys_to_force_numeric = [
+        "iteration",
+        "timesteps",
+        "episodes",
+        "seed",
+        "rollout_id",
+        "success_rate",
+        "mean_episode_length",
+        "avg_episode_reward",
+        "violations_per_100_steps",
+        "avg_time_to_failure",
+        "failure_rate",
+        "avg_collisions_per_episode",
+        "avg_oob_per_episode",
+        "avg_speed_violations_per_episode",
+        "avg_falls_per_episode",
+        "avg_total_violations_per_episode",
+        "success",
+        "episode_length",
+        "episode_reward",
+        "collision_count",
+        "oob_count",
+        "speed_count",
+        "fall_count",
+        "total_violations",
+        "time_to_failure",
+        "x",
+        "y",
+    ]
+
+    if "max_steps" not in out:
+        out["max_steps"] = 0.0
+
+    for k in keys_to_force_numeric:
+        if k in out:
+            out[k] = sanitize_scalar(k, out[k], out)
+
+    # make obvious integer-like fields integer
+    int_like = {"iteration", "timesteps", "episodes", "seed", "rollout_id"}
+    for k in int_like:
+        if k in out:
+            out[k] = int(round(float(out[k])))
+
+    return out
+
+
 def save_dict_rows_to_csv(rows, path):
     if not rows:
         return
     ensure_dir(Path(path).parent)
-    keys = list(rows[0].keys())
+    clean_rows = [sanitize_record(r) for r in rows]
+    keys = list(clean_rows[0].keys())
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=keys)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(clean_rows)
 
 
 def save_dict_to_json(data, path):
     ensure_dir(Path(path).parent)
+    if isinstance(data, dict):
+        data = sanitize_record(data)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -343,24 +441,26 @@ def evaluate_model(
         time_to_failure_list.append(counters["time_to_failure"])
 
     valid_ttf = [x for x in time_to_failure_list if not np.isnan(x)]
-    avg_time_to_failure = float(np.mean(valid_ttf)) if valid_ttf else None
+    avg_time_to_failure = float(np.mean(valid_ttf)) if valid_ttf else float(np.mean(episode_lengths))
 
-    return {
+    result = {
         "episodes": int(n_episodes),
-        "success_rate": float(np.mean(successes)),
-        "mean_episode_length": float(np.mean(episode_lengths)),
-        "avg_episode_reward": float(np.mean(episode_rewards)),
-        "violations_per_100_steps": float(np.mean(violations_per_100_steps_list)),
+        "success_rate": float(np.mean(successes)) if successes else 0.0,
+        "mean_episode_length": float(np.mean(episode_lengths)) if episode_lengths else 0.0,
+        "avg_episode_reward": float(np.mean(episode_rewards)) if episode_rewards else 0.0,
+        "violations_per_100_steps": float(np.mean(violations_per_100_steps_list)) if violations_per_100_steps_list else 0.0,
         "avg_time_to_failure": avg_time_to_failure,
         "failure_rate": float(
             np.mean([0.0 if np.isnan(x) else 1.0 for x in time_to_failure_list])
-        ),
-        "avg_collisions_per_episode": float(np.mean(collisions_per_episode)),
-        "avg_oob_per_episode": float(np.mean(oob_per_episode)),
-        "avg_speed_violations_per_episode": float(np.mean(speed_per_episode)),
-        "avg_falls_per_episode": float(np.mean(fall_per_episode)),
-        "avg_total_violations_per_episode": float(np.mean(total_violations_per_episode)),
+        ) if time_to_failure_list else 0.0,
+        "avg_collisions_per_episode": float(np.mean(collisions_per_episode)) if collisions_per_episode else 0.0,
+        "avg_oob_per_episode": float(np.mean(oob_per_episode)) if oob_per_episode else 0.0,
+        "avg_speed_violations_per_episode": float(np.mean(speed_per_episode)) if speed_per_episode else 0.0,
+        "avg_falls_per_episode": float(np.mean(fall_per_episode)) if fall_per_episode else 0.0,
+        "avg_total_violations_per_episode": float(np.mean(total_violations_per_episode)) if total_violations_per_episode else 0.0,
     }
+
+    return sanitize_record(result)
 
 
 def rollout_episode(
@@ -425,7 +525,7 @@ def rollout_episode(
         "total_violations": float(counters["total_violations"]),
         "violations_per_100_steps": float(violations_per_100_steps),
         "time_to_failure": (
-            None if np.isnan(counters["time_to_failure"])
+            float(ep_len) if np.isnan(counters["time_to_failure"])
             else float(counters["time_to_failure"])
         ),
     }
@@ -435,7 +535,7 @@ def rollout_episode(
         "goal_xy": goal_xy,
         "obs_xy": obs_xy,
         "obs_r": obs_r,
-        "metrics": rollout_metrics,
+        "metrics": sanitize_record(rollout_metrics),
     }
 
 
@@ -515,24 +615,64 @@ def model_metrics_for_plot():
     ]
 
 
-def plot_learning_curve(curve_csv_path, model_name, out_png_path):
-    df = pd.read_csv(curve_csv_path)
+def plot_per_metric_across_seeds(model_name, model_budget_dir, seeds):
+    """
+    Create:
+      model_budget_dir / learning_curves / <metric>.png
+
+    Each PNG:
+      X axis = iteration
+      Y axis = metric
+      One line per seed
+    """
+    learning_curves_dir = model_budget_dir / "learning_curves"
+    ensure_dir(learning_curves_dir)
+
     metrics = model_metrics_for_plot()
 
-    plt.figure(figsize=(14, 8))
-    for metric in metrics:
-        if metric in df.columns:
-            y = pd.to_numeric(df[metric], errors="coerce")
-            plt.plot(df["iteration"], y, marker="o", label=metric)
+    seed_frames = {}
+    for seed in seeds:
+        csv_path = model_budget_dir / f"seed_{seed}" / "curves" / "learning_curve.csv"
+        if csv_path.exists():
+            df = pd.read_csv(csv_path)
+            seed_frames[seed] = df
 
-    plt.xlabel("Iteration")
-    plt.ylabel("Value")
-    plt.title(f"Learning Curve ({model_name})")
-    plt.grid(True, linestyle="--", alpha=0.4)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_png_path, dpi=160)
-    plt.close()
+    if not seed_frames:
+        return
+
+    for metric in metrics:
+        plt.figure(figsize=(12, 7))
+
+        plotted_any = False
+        for seed, df in seed_frames.items():
+            if "iteration" not in df.columns or metric not in df.columns:
+                continue
+
+            x = pd.to_numeric(df["iteration"], errors="coerce")
+            y = pd.to_numeric(df[metric], errors="coerce")
+
+            if metric == "avg_time_to_failure" and "mean_episode_length" in df.columns:
+                mel = pd.to_numeric(df["mean_episode_length"], errors="coerce")
+                y = y.fillna(mel)
+
+            y = y.fillna(0.0)
+            x = x.fillna(0.0)
+
+            plt.plot(x, y, marker="o", label=f"seed_{seed}")
+            plotted_any = True
+
+        if not plotted_any:
+            plt.close()
+            continue
+
+        plt.xlabel("Iteration")
+        plt.ylabel(metric)
+        plt.title(f"{metric} ({model_name})")
+        plt.grid(True, linestyle="--", alpha=0.4)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(learning_curves_dir / f"{metric}.png", dpi=160)
+        plt.close()
 
 
 def aggregate_learning_curves(curve_paths, model_name, out_csv_path, out_png_path):
@@ -566,8 +706,11 @@ def aggregate_learning_curves(curve_paths, model_name, out_csv_path, out_png_pat
             if vals:
                 row[f"{metric}_mean"] = float(np.mean(vals))
                 row[f"{metric}_std"] = float(np.std(vals))
+            else:
+                row[f"{metric}_mean"] = 0.0
+                row[f"{metric}_std"] = 0.0
 
-        rows.append(row)
+        rows.append(sanitize_record(row))
 
     save_dict_rows_to_csv(rows, out_csv_path)
 
@@ -582,9 +725,9 @@ def aggregate_learning_curves(curve_paths, model_name, out_csv_path, out_png_pat
         if mean_col not in df_agg.columns:
             continue
 
-        x = df_agg["iteration"].to_numpy()
-        y = df_agg[mean_col].to_numpy()
-        s = df_agg[std_col].to_numpy()
+        x = pd.to_numeric(df_agg["iteration"], errors="coerce").fillna(0.0).to_numpy()
+        y = pd.to_numeric(df_agg[mean_col], errors="coerce").fillna(0.0).to_numpy()
+        s = pd.to_numeric(df_agg[std_col], errors="coerce").fillna(0.0).to_numpy()
 
         plt.plot(x, y, marker="o", label=f"{metric} (mean)")
         plt.fill_between(x, y - s, y + s, alpha=0.18)
@@ -603,7 +746,8 @@ def plot_metrics_vs_seed(final_rows, model_name, out_png_path):
     if not final_rows:
         return
 
-    rows = sorted(final_rows, key=lambda x: x["seed"])
+    rows = [sanitize_record(r) for r in final_rows]
+    rows = sorted(rows, key=lambda x: x["seed"])
     seeds = [r["seed"] for r in rows]
 
     plt.figure(figsize=(12, 7))
@@ -644,11 +788,12 @@ def plot_metrics_vs_seed(final_rows, model_name, out_png_path):
         )
 
     if "avg_time_to_failure" in rows[0]:
-        ttf_vals = [
-            np.nan if r["avg_time_to_failure"] is None else r["avg_time_to_failure"]
-            for r in rows
-        ]
-        plt.plot(seeds, ttf_vals, marker="o", label="avg_time_to_failure")
+        plt.plot(
+            seeds,
+            [r["avg_time_to_failure"] for r in rows],
+            marker="o",
+            label="avg_time_to_failure",
+        )
 
     plt.xlabel("Seed")
     plt.ylabel("Value")
@@ -909,8 +1054,10 @@ def run_single_seed(model_name, seed, args, model_budget_dir, cfg):
             row = {
                 "iteration": it,
                 "timesteps": current_timesteps,
+                "max_steps": args.max_steps,
             }
             row.update(stats)
+            row = sanitize_record(row)
             curve_records.append(row)
 
             print(
@@ -923,7 +1070,7 @@ def run_single_seed(model_name, seed, args, model_budget_dir, cfg):
                 f"viol/100={row['violations_per_100_steps']:.3f} | "
                 f"coll/ep={row['avg_collisions_per_episode']:.3f} | "
                 f"reward={row['avg_episode_reward']:.3f} | "
-                f"ttf={row['avg_time_to_failure']}",
+                f"ttf={row['avg_time_to_failure']:.3f}",
                 flush=True,
             )
 
@@ -931,9 +1078,7 @@ def run_single_seed(model_name, seed, args, model_budget_dir, cfg):
     save_params(params, latest_model_path)
 
     curve_csv_path = curves_dir / "learning_curve.csv"
-    curve_png_path = curves_dir / "learning_curve.png"
     save_dict_rows_to_csv(curve_records, curve_csv_path)
-    plot_learning_curve(curve_csv_path, model_name, curve_png_path)
 
     final_stats = evaluate_model(
         params=params,
@@ -943,13 +1088,14 @@ def run_single_seed(model_name, seed, args, model_budget_dir, cfg):
         seed=10_000 + seed,
     )
 
-    final_stats_with_seed = {"seed": seed}
+    final_stats_with_seed = {"seed": seed, "max_steps": args.max_steps}
     final_stats_with_seed.update(final_stats)
+    final_stats_with_seed = sanitize_record(final_stats_with_seed)
 
     save_dict_rows_to_csv([final_stats_with_seed], eval_dir / "final_eval.csv")
     save_dict_to_json(final_stats_with_seed, eval_dir / "final_eval.json")
 
-    print(f"[{model_name}] Seed {seed} final stats: {final_stats}", flush=True)
+    print(f"[{model_name}] Seed {seed} final stats: {final_stats_with_seed}", flush=True)
 
     rollout_rows = []
 
@@ -977,7 +1123,7 @@ def run_single_seed(model_name, seed, args, model_budget_dir, cfg):
 
         row = {"rollout_id": k, "seed": rollout_seed}
         row.update(rollout_data["metrics"])
-        rollout_rows.append(row)
+        rollout_rows.append(sanitize_record(row))
 
     save_dict_rows_to_csv(rollout_rows, rollouts_dir / "rollout_metrics.csv")
 
@@ -1001,6 +1147,7 @@ def aggregate_model_results(model_name, model_budget_dir, seeds):
     if not all_seed_rows:
         return
 
+    all_seed_rows = [sanitize_record(r) for r in all_seed_rows]
     save_dict_rows_to_csv(all_seed_rows, aggregated_dir / "all_seed_eval.csv")
 
     metrics = [
@@ -1053,6 +1200,12 @@ def aggregate_model_results(model_name, model_budget_dir, seeds):
         out_png_path=aggregated_dir / "metrics_vs_seed.png",
     )
 
+    plot_per_metric_across_seeds(
+        model_name=model_name,
+        model_budget_dir=model_budget_dir,
+        seeds=seeds,
+    )
+
 
 # =========================================================
 # CLI
@@ -1077,12 +1230,12 @@ def parse_args():
     parser.add_argument("--entropy_coef", type=float, default=0.01)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
 
-    parser.add_argument("--eval_every_iters", type=int, default=2)
+    parser.add_argument("--eval_every_iters", type=int, default=5)
     parser.add_argument("--eval_eps", type=int, default=50)
     parser.add_argument("--final_eval_eps", type=int, default=200)
     parser.add_argument("--rollouts_per_seed", type=int, default=3)
 
-    parser.add_argument("--num_envs", type=int, default=16)
+    parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--max_steps", type=int, default=300)
 
     return parser.parse_args()
@@ -1111,6 +1264,7 @@ def main():
     print(f"ppo_epochs         : {args.ppo_epochs}", flush=True)
     print(f"minibatch_size     : {args.minibatch_size}", flush=True)
     print(f"hidden_dim         : {args.hidden_dim}", flush=True)
+    print(f"eval_every_iters   : {args.eval_every_iters}", flush=True)
     print(f"eval_eps           : {args.eval_eps}", flush=True)
     print(f"final_eval_eps     : {args.final_eval_eps}", flush=True)
     print(f"rollouts_per_seed  : {args.rollouts_per_seed}", flush=True)

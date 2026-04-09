@@ -4,18 +4,21 @@
 #
 # Main idea:
 #   - reward progress toward the goal
-#   - apply penalties for hard safety violations:
+#   - apply penalties for safety violations:
 #       * collision
 #       * out_of_bounds
 #       * speed_violation
 #       * fall
-#   - terminate the episode immediately on hard violations
+#   - terminate the episode immediately on:
+#       * collision
+#       * out_of_bounds
+#       * speed_violation
+#       * fall
 #   - success still gives a positive bonus
 #
-# This version is the strictest one and is intended to
-# encourage safer behavior through both:
-#   - penalties
-#   - early termination
+# This version is strict:
+#   - stronger progress reward
+#   - speed violation is treated as a hard violation again
 # =========================================================
 
 import numpy as np
@@ -27,8 +30,7 @@ class BraxAntHardConstraint(BraxAntBase):
     """
     Hard-constraint environment.
 
-    This version terminates the episode as soon as a hard
-    safety event happens:
+    Immediate termination for:
       - collision
       - out_of_bounds
       - speed_violation
@@ -53,15 +55,13 @@ class BraxAntHardConstraint(BraxAntBase):
 
         # -----------------------------------------------
         # Base reward:
-        #   progress toward goal - small step penalty
+        #   stronger progress reward - small step penalty
         # -----------------------------------------------
         progress = self._progress_reward(dist_before, dist_after)
-        reward = progress - self.cfg.step_penalty
+        reward = 3.0 * progress - self.cfg.step_penalty
 
         # -----------------------------------------------
-        # Hard safety checks
-        # Same violation types as soft-constraint,
-        # but here they also terminate the episode.
+        # Safety checks
         # -----------------------------------------------
         collision = self._collision().astype(np.float32)
         oob = self._oob().astype(np.float32)
@@ -69,7 +69,7 @@ class BraxAntHardConstraint(BraxAntBase):
         fall = self._fall().astype(np.float32)
 
         # -----------------------------------------------
-        # Apply penalties
+        # Penalties
         # -----------------------------------------------
         reward = reward - collision * self.cfg.collision_penalty
         reward = reward - oob * self.cfg.oob_penalty
@@ -77,17 +77,17 @@ class BraxAntHardConstraint(BraxAntBase):
         reward = reward - fall * self.cfg.fall_penalty
 
         # -----------------------------------------------
-        # Success check
+        # Success
         # -----------------------------------------------
         success = self._success().astype(np.float32)
         reward = reward + success * self.cfg.success_bonus
 
         # -----------------------------------------------
-        # Hard termination:
+        # Hard termination
         #   - success
         #   - collision
         #   - out_of_bounds
-        #   - speed violation
+        #   - speed_violation
         #   - fall
         #   - max_steps
         # -----------------------------------------------

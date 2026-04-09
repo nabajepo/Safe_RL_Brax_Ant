@@ -1,4 +1,0 @@
-rollout_id,seed,success,episode_length,episode_reward,collision_count,oob_count,speed_count,fall_count,total_violations,violations_per_100_steps,time_to_failure
-0,4000,0.0,300.0,-3.3470906373113394,0.0,0.0,0.0,0.0,0.0,0.0,
-1,4001,0.0,300.0,-3.2877668477594852,0.0,0.0,0.0,0.0,0.0,0.0,
-2,4002,0.0,300.0,-3.197170900180936,0.0,0.0,0.0,0.0,0.0,0.0,

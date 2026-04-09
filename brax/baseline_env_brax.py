@@ -36,6 +36,17 @@ from typing import Dict, Type, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# ---------------------------------------------------------
+# Compatibility shim:
+# some Brax code paths still call jax.tree_map
+# but newer JAX expects jax.tree_util.tree_map
+# ---------------------------------------------------------
+try:
+    _ = jax.tree_map
+except AttributeError:
+    jax.tree_map = jax.tree_util.tree_map
+
 from brax import envs
 
 
@@ -44,7 +55,7 @@ class Cfg:
     # -----------------------------------------------------
     # Parallel simulation
     # -----------------------------------------------------
-    num_envs: int = 16
+    num_envs: int = 128
 
     # -----------------------------------------------------
     # Episode
@@ -55,26 +66,26 @@ class Cfg:
     # Navigation arena (2D task space)
     # -----------------------------------------------------
     arena_size: float = 6.0
-    goal_radius: float = 1.0
+    goal_radius: float = 1.5
 
     # -----------------------------------------------------
     # Random placement control
     # -----------------------------------------------------
     wall_margin: float = 0.80
-    start_goal_min_dist: float = 2.50
-    start_goal_max_dist: float = 5.00
+    start_goal_min_dist: float = 2.0
+    start_goal_max_dist: float = 4.0
 
     # -----------------------------------------------------
     # Obstacles
     # -----------------------------------------------------
-    n_obstacles: int = 3
-    obstacle_radius_min: float = 0.35
-    obstacle_radius_max: float = 0.60
+    n_obstacles: int = 2
+    obstacle_radius_min: float = 0.30
+    obstacle_radius_max: float = 0.50
     obstacle_min_separation: float = 0.60
 
     # At least one obstacle is placed near the direct path
     # from the Brax start position to the goal.
-    path_obstacle_offset: float = 0.90
+    path_obstacle_offset: float = 0.70
 
     # -----------------------------------------------------
     # Start / goal clearance
@@ -93,12 +104,12 @@ class Cfg:
     # -----------------------------------------------------
     # Reward settings
     # -----------------------------------------------------
-    success_bonus: float = 50.0
+    success_bonus: float = 100.0
     step_penalty: float = 0.01
-    collision_penalty: float = 20.0
-    oob_penalty: float = 20.0
-    speed_penalty: float = 2.0
-    fall_penalty: float = 25.0
+    collision_penalty: float = 6.0
+    oob_penalty: float = 6.0
+    speed_penalty: float = 1.0
+    fall_penalty: float = 8.0
 
 
 class BraxAntBase:

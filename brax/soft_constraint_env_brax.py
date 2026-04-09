@@ -50,15 +50,13 @@ class BraxAntSoftConstraint(BraxAntBase):
 
         # -----------------------------------------------
         # Base reward:
-        #   progress toward goal - small step penalty
+        #   stronger progress reward - small step penalty
         # -----------------------------------------------
         progress = self._progress_reward(dist_before, dist_after)
-        reward = progress - self.cfg.step_penalty
+        reward = 3.0 * progress - self.cfg.step_penalty
 
         # -----------------------------------------------
         # Soft safety checks
-        # Same violation types as hard-constraint,
-        # but here they only affect reward.
         # -----------------------------------------------
         collision = self._collision().astype(np.float32)
         oob = self._oob().astype(np.float32)

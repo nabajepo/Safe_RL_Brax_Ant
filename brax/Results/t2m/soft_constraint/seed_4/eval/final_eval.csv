@@ -1,0 +1,2 @@
+seed,max_steps,episodes,success_rate,mean_episode_length,avg_episode_reward,violations_per_100_steps,avg_time_to_failure,failure_rate,avg_collisions_per_episode,avg_oob_per_episode,avg_speed_violations_per_episode,avg_falls_per_episode,avg_total_violations_per_episode
+4,0.0,200,0.005,298.87,-105.86779969499446,4.895720720720721,39.111111111111114,0.045,4.33,0.0,0.0,9.67,14.0
