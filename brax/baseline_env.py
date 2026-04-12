@@ -66,7 +66,7 @@ class Cfg:
     # Navigation arena (2D task space)
     # -----------------------------------------------------
     arena_size: float = 6.0
-    goal_radius: float = 1.0
+    goal_radius: float = 1.5
 
     # -----------------------------------------------------
     # Random placement control
@@ -109,12 +109,12 @@ class Cfg:
     # -----------------------------------------------------
     # Reward settings
     # -----------------------------------------------------
-    success_bonus: float = 100.0
-    step_penalty: float = 0.01
-    collision_penalty: float = 6.0
-    oob_penalty: float = 6.0
-    speed_penalty: float = 1.0
-    fall_penalty: float = 8.0
+    success_bonus: float = 25.0
+    step_penalty: float = 0.05
+    collision_penalty: float = 5.0
+    oob_penalty: float = 5.0
+    speed_penalty: float = 0.5
+    fall_penalty: float = 6.0
 
 
 class BraxAntBase:

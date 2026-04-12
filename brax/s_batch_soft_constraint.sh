@@ -13,7 +13,7 @@ PROJECT_DIR="/home/jean17/projects/def-cbelling-ab/jean17/csi_4900_brax"
 CONTAINER="${PROJECT_DIR}/python_3.10.sif"
 
 MODEL_NAME="soft_constraint"
-TIMESTEPS=1000000
+TIMESTEPS=131072
 RESULTS_ROOT="Results"
 SEEDS=(0 1 2 3 4)
 
@@ -34,20 +34,30 @@ EVAL_EVERY_ITERS=5
 EVAL_EPS=50
 FINAL_EVAL_EPS=200
 ROLLOUTS_PER_SEED=3
-CHECKPOINT_EVERY_TIMESTEPS=200000
+CHECKPOINT_EVERY_TIMESTEPS=131072
 
 NUM_ENVS=512
 MAX_STEPS=300
 
-BUDGET_TAG="t$((TIMESTEPS / 1000000))m"
+if (( TIMESTEPS >= 1000000 )) && (( TIMESTEPS % 1000000 == 0 )); then
+    BUDGET_TAG="t$((TIMESTEPS / 1000000))m"
+elif (( TIMESTEPS >= 1000 )) && (( TIMESTEPS % 1000 == 0 )); then
+    BUDGET_TAG="t$((TIMESTEPS / 1000))k"
+else
+    BUDGET_TAG="t${TIMESTEPS}"
+fi
 
 cd "${PROJECT_DIR}"
 
+PIPELINE_START=$(date '+%Y-%m-%d %H:%M:%S')
 echo "============================================================"
 echo "Submitting CSI4900 pipeline for model: ${MODEL_NAME}"
+echo "Start time        : ${PIPELINE_START}"
 echo "Project directory : ${PROJECT_DIR}"
 echo "Container         : ${CONTAINER}"
 echo "Budget tag        : ${BUDGET_TAG}"
+echo "Requested steps   : ${TIMESTEPS}"
+echo "Actual steps/run  : 19922944"
 echo "Seeds             : ${SEEDS[*]}"
 echo "Submit job ID     : ${SLURM_JOB_ID}"
 echo "============================================================"
@@ -61,8 +71,8 @@ for SEED in "${SEEDS[@]}"; do
 #SBATCH --job-name=${MODEL_NAME}_s${SEED}
 #SBATCH --output=${MODEL_NAME}_seed_${SEED}_%j.txt
 #SBATCH --error=${MODEL_NAME}_seed_${SEED}_%j.txt
-#SBATCH --time=48:00:00
-#SBATCH --cpus-per-task=8
+#SBATCH --time=6-00:00:00
+#SBATCH --cpus-per-task=12
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 
@@ -73,8 +83,10 @@ CONTAINER="${CONTAINER}"
 
 cd "\${PROJECT_DIR}"
 
+TRAIN_START=\$(date '+%Y-%m-%d %H:%M:%S')
 echo "============================================================"
 echo "Starting training job for model=${MODEL_NAME}, seed=${SEED}"
+echo "Start time        : \${TRAIN_START}"
 echo "Project directory : \${PROJECT_DIR}"
 echo "Container         : \${CONTAINER}"
 echo "Job ID            : \${SLURM_JOB_ID}"
@@ -131,6 +143,12 @@ apptainer exec \
       --num_envs ${NUM_ENVS} \
       --max_steps ${MAX_STEPS}
   "
+
+TRAIN_END=\$(date '+%Y-%m-%d %H:%M:%S')
+echo "============================================================"
+echo "Finished training job for model=${MODEL_NAME}, seed=${SEED}"
+echo "End time          : \${TRAIN_END}"
+echo "============================================================"
 EOF
 )
     TRAIN_JOB_IDS+=("${JOB_ID}")
@@ -148,6 +166,8 @@ AGG_JOB_ID=$(sbatch --parsable --dependency=afterok:${DEPENDENCY} <<EOF
 #SBATCH --time=04:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
+#SBATCH --mail-user=jnahi100@uottawa.ca
+#SBATCH --mail-type=END,FAIL
 
 set -euo pipefail
 
@@ -160,6 +180,12 @@ SEEDS_STR="${SEEDS[*]}"
 BUDGET_TAG="${BUDGET_TAG}"
 
 cd "\${PROJECT_DIR}"
+
+AGG_START=\$(date '+%Y-%m-%d %H:%M:%S')
+echo "============================================================"
+echo "Starting aggregation for model=\${MODEL_NAME}"
+echo "Start time        : \${AGG_START}"
+echo "============================================================"
 
 module load apptainer/1.4.5
 
@@ -183,23 +209,24 @@ apptainer exec \
       --seeds \${SEEDS_STR} \
       --timesteps \${TIMESTEPS} \
       --results_root \${RESULTS_ROOT}
-
-    echo 'Sending completion email ...'
-    MAIL_USER='nabajepo@gmail.com' \
-    MAIL_PASS='CHANGE_ME_APP_PASSWORD' \
-    MAIL_TO='jnahi100@uottawa.ca' \
-    MAIL_SUBJECT='CSI 4900 - soft_constraint terminé' \
-    MAIL_BODY=\$'Salut,\\n\\nLe pipeline du modèle soft_constraint est terminé sur Compute Canada.\\n\\nRésultats :\\n\${PROJECT_DIR}/\${RESULTS_ROOT}/\${BUDGET_TAG}/\${MODEL_NAME}\\n\\nMessage automatique.' \
-    python mail_me.py
   "
+
+AGG_END=\$(date '+%Y-%m-%d %H:%M:%S')
+echo "============================================================"
+echo "Finished aggregation for model=\${MODEL_NAME}"
+echo "End time          : \${AGG_END}"
+echo "Results available : \${PROJECT_DIR}/\${RESULTS_ROOT}/\${BUDGET_TAG}/\${MODEL_NAME}"
+echo "============================================================"
 EOF
 )
 
 echo "Submitted aggregation job: ${AGG_JOB_ID}"
 
+PIPELINE_END=$(date '+%Y-%m-%d %H:%M:%S')
 echo "============================================================"
 echo "Pipeline submission completed for model: ${MODEL_NAME}"
-echo "Training jobs : ${TRAIN_JOB_IDS[*]}"
-echo "Aggregate job : ${AGG_JOB_ID}"
-echo "Results root  : ${PROJECT_DIR}/${RESULTS_ROOT}"
+echo "Submission end    : ${PIPELINE_END}"
+echo "Training jobs     : ${TRAIN_JOB_IDS[*]}"
+echo "Aggregate job     : ${AGG_JOB_ID}"
+echo "Results root      : ${PROJECT_DIR}/${RESULTS_ROOT}"
 echo "============================================================"

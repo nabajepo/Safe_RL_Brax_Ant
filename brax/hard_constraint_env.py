@@ -12,13 +12,12 @@
 #   - terminate the episode immediately on:
 #       * collision
 #       * out_of_bounds
-#       * speed_violation
 #       * fall
 #   - success still gives a positive bonus
 #
-# This version is strict:
-#   - stronger progress reward
-#   - speed violation is treated as a hard violation again
+# Important:
+#   - speed violation is penalized strongly
+#   - but does NOT terminate the episode immediately
 # =========================================================
 
 import numpy as np
@@ -33,8 +32,11 @@ class BraxAntHardConstraint(BraxAntBase):
     Immediate termination for:
       - collision
       - out_of_bounds
-      - speed_violation
       - fall
+
+    Speed violation:
+      - strong penalty
+      - no immediate termination
     """
 
     def step(self, action):
@@ -73,7 +75,10 @@ class BraxAntHardConstraint(BraxAntBase):
         # -----------------------------------------------
         reward = reward - collision * self.cfg.collision_penalty
         reward = reward - oob * self.cfg.oob_penalty
-        reward = reward - speed_violation * self.cfg.speed_penalty
+
+        # stronger penalty for speed, but no hard termination
+        reward = reward - speed_violation * (2.0 * self.cfg.speed_penalty)
+
         reward = reward - fall * self.cfg.fall_penalty
 
         # -----------------------------------------------
@@ -87,15 +92,15 @@ class BraxAntHardConstraint(BraxAntBase):
         #   - success
         #   - collision
         #   - out_of_bounds
-        #   - speed_violation
         #   - fall
         #   - max_steps
+        #
+        # Speed violation does NOT terminate immediately
         # -----------------------------------------------
         done = (
             (success > 0.0)
             | (collision > 0.0)
             | (oob > 0.0)
-            | (speed_violation > 0.0)
             | (fall > 0.0)
             | (self.t >= self.cfg.max_steps)
         )
