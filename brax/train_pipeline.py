@@ -2,11 +2,6 @@
 # =========================================================
 # Shared training pipeline for the CSI4900 Brax project.
 #
-# This file is used by:
-#   - train_no_constraint.py
-#   - train_soft_constraint.py
-#   - train_hard_constraint.py
-#
 # Main responsibilities:
 #   - training utilities
 #   - pure JAX actor-critic network
@@ -23,7 +18,7 @@ import math
 import pickle
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
@@ -130,6 +125,7 @@ def sanitize_record(row: Dict[str, Any]) -> Dict[str, Any]:
         "episodes",
         "seed",
         "rollout_id",
+        "max_steps",
         "success_rate",
         "mean_episode_length",
         "avg_episode_reward",
@@ -157,17 +153,13 @@ def sanitize_record(row: Dict[str, Any]) -> Dict[str, Any]:
         "eval_time_sec",
         "elapsed_time_sec",
         "timesteps_per_sec",
-        "best_score",
     ]
-
-    if "max_steps" not in out:
-        out["max_steps"] = 0.0
 
     for k in keys_to_force_numeric:
         if k in out:
             out[k] = sanitize_scalar(k, out[k], out)
 
-    int_like = {"iteration", "timesteps", "episodes", "seed", "rollout_id"}
+    int_like = {"iteration", "timesteps", "episodes", "seed", "rollout_id", "max_steps"}
     for k in int_like:
         if k in out:
             out[k] = int(round(float(out[k])))
@@ -217,6 +209,59 @@ def save_training_state(path, params, opt_state, meta: Dict[str, Any]):
 
 def load_training_state(path):
     return load_pickle(path)
+
+
+# =========================================================
+# Layout validity helpers
+# =========================================================
+def current_layout_has_blocking_obstacle(env) -> bool:
+    """
+    Extra safety check used during evaluation and rollout.
+
+    Returns True if the current sampled layout contains at least one
+    obstacle that blocks the direct path between start and goal.
+    """
+    try:
+        start_xy = env.torso_xy_t[0].copy()
+        goal_xy = env.goal[0].copy()
+        obs_xy = env.obs_xy[0].copy()
+        obs_r = env.obs_r[0].copy()
+
+        return bool(
+            env._path_blocked_by_any_obstacle(
+                start=start_xy,
+                goal=goal_xy,
+                obs_xy=obs_xy,
+                obs_r=obs_r,
+            )
+        )
+    except Exception:
+        return False
+
+
+def reset_env_until_blocking_layout(env, rng_key, max_tries: int = 50):
+    """
+    Reset the environment until the sampled layout contains at least one
+    obstacle blocking the direct agent->goal path.
+
+    In practice, baseline_env.py should already guarantee this.
+    This helper acts as an explicit safety net for eval/rollout.
+    """
+    obs, metrics = env.reset(rng_key)
+
+    if current_layout_has_blocking_obstacle(env):
+        return obs, metrics
+
+    base_seed = int(np.array(rng_key[0], dtype=np.uint32))
+
+    for k in range(1, max_tries + 1):
+        retry_key = jax.random.PRNGKey(base_seed + 9973 * k)
+        obs, metrics = env.reset(retry_key)
+
+        if current_layout_has_blocking_obstacle(env):
+            return obs, metrics
+
+    return obs, metrics
 
 
 # =========================================================
@@ -439,7 +484,9 @@ def evaluate_model(
 
         env = env_cls(ep_cfg)
         rng_key = jax.random.PRNGKey(seed + ep)
-        obs, _ = env.reset(rng_key)
+
+        # explicit blocking-layout reset
+        obs, _ = reset_env_until_blocking_layout(env, rng_key)
 
         done = np.array([False])
         ep_reward = 0.0
@@ -520,7 +567,9 @@ def rollout_episode(
 
     env = env_cls(roll_cfg)
     rng_key = jax.random.PRNGKey(seed)
-    obs, _ = env.reset(rng_key)
+
+    # explicit blocking-layout reset
+    obs, _ = reset_env_until_blocking_layout(env, rng_key)
 
     done = np.array([False])
     last_metrics = None
@@ -592,10 +641,8 @@ def save_rollout_plot(rollout_data, cfg: Cfg, model_name: str, seed: int, out_pn
     m = rollout_data["metrics"]
 
     plt.figure(figsize=(8, 8))
-    # Trajectory
     plt.plot(traj[:, 0], traj[:, 1], linewidth=2, label="trajectory")
 
-    # Start
     plt.scatter(
         traj[0, 0],
         traj[0, 1],
@@ -606,7 +653,6 @@ def save_rollout_plot(rollout_data, cfg: Cfg, model_name: str, seed: int, out_pn
         zorder=6,
     )
 
-    # Goal
     plt.scatter(
         goal_xy[0],
         goal_xy[1],
@@ -618,7 +664,6 @@ def save_rollout_plot(rollout_data, cfg: Cfg, model_name: str, seed: int, out_pn
         zorder=7,
     )
 
-    # Goal success radius
     goal_circle = plt.Circle(
         (float(goal_xy[0]), float(goal_xy[1])),
         float(cfg.goal_radius),
@@ -659,7 +704,6 @@ def save_rollout_plot(rollout_data, cfg: Cfg, model_name: str, seed: int, out_pn
         )
         plt.gca().add_patch(buffer_circle)
 
-    # Arena border
     a = cfg.arena_size
     arena_rect = plt.Rectangle(
         (-a, -a),
@@ -1129,13 +1173,14 @@ def run_single_seed(model_name, seed, args, model_budget_dir, cfg):
     save_dict_to_json(config_to_save, model_dir / "config.json")
 
     steps_per_iter = args.steps_per_env * cfg.num_envs
-    num_iters = max(1, args.timesteps // steps_per_iter)
+
+    # important: ceil instead of floor so requested budget is actually reached or exceeded
+    num_iters = max(1, math.ceil(args.timesteps / steps_per_iter))
 
     curve_records = []
     rng = jax.random.PRNGKey(seed + 1234)
 
     best_stats = None
-    best_score = None
     train_start_time = time.perf_counter()
 
     for it in range(1, num_iters + 1):
@@ -1209,7 +1254,6 @@ def run_single_seed(model_name, seed, args, model_budget_dir, cfg):
                 "timesteps": current_timesteps,
             }
 
-            # latest model
             save_latest_model(
                 model_dir=model_dir,
                 params=params,
@@ -1218,7 +1262,6 @@ def run_single_seed(model_name, seed, args, model_budget_dir, cfg):
                 meta=current_meta,
             )
 
-            # periodic checkpoint
             maybe_save_checkpoint(
                 model_dir=model_dir,
                 params=params,
@@ -1229,11 +1272,8 @@ def run_single_seed(model_name, seed, args, model_budget_dir, cfg):
                 checkpoint_every=args.checkpoint_every_timesteps,
             )
 
-            # best model
             if is_better_model(row, best_stats):
                 best_stats = dict(row)
-                best_score = compute_selection_score(best_stats)
-                best_stats["best_score"] = list(best_score)
 
                 save_best_model(
                     model_dir=model_dir,

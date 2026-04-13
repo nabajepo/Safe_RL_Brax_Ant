@@ -66,54 +66,60 @@ class Cfg:
     # Navigation arena (2D task space)
     # -----------------------------------------------------
     arena_size: float = 6.0
-    goal_radius: float = 1.5
+    goal_radius: float = 0.60
 
     # -----------------------------------------------------
     # Random placement control
     # -----------------------------------------------------
-    wall_margin: float = 0.80
-    start_goal_min_dist: float = 2.0
-    start_goal_max_dist: float = 4.0
+    wall_margin: float = 0.90
+    start_goal_min_dist: float = 4.0
+    start_goal_max_dist: float = 5.4
 
     # -----------------------------------------------------
     # Obstacles
     # -----------------------------------------------------
     n_obstacles: int = 3
-    obstacle_radius_min: float = 0.30
-    obstacle_radius_max: float = 0.50
-    obstacle_min_separation: float = 0.70
+    obstacle_radius_min: float = 0.22
+    obstacle_radius_max: float = 0.38
+    obstacle_min_separation: float = 0.65
 
-    # At least one obstacle is placed near the direct path
-    # from the Brax start position to the goal.
-    path_obstacle_offset: float = 0.65
+    # Stronger control for the "blocking" obstacle.
+    path_obstacle_offset: float = 0.18
+
+    # Minimum overlap margin between direct path corridor
+    # and the obstacle radius+agent radius footprint.
+    path_blocking_extra_margin: float = 0.10
+
+    # Allowed alpha interval for the guaranteed blocking obstacle.
+    # This avoids placing it too close to start or too close to goal.
+    path_alpha_min: float = 0.38
+    path_alpha_max: float = 0.62
 
     # -----------------------------------------------------
     # Start / goal clearance
     # -----------------------------------------------------
     start_clearance_extra: float = 0.55
-    goal_clearance_extra: float = 0.65
+    goal_clearance_extra: float = 0.80
 
-    # Extra clearance around the goal success region.
-    # This makes sure obstacles do not visually/logically
-    # invade the success zone around the goal.
-    goal_success_clearance_extra: float = 0.25
+    # Keep obstacles clearly outside the success circle.
+    goal_success_clearance_extra: float = 0.30
 
     # -----------------------------------------------------
     # Safety thresholds
     # -----------------------------------------------------
-    buffer_dist: float = 0.60
+    buffer_dist: float = 0.50
     v_max: float = 3.00
     fall_threshold: float = 0.25
-    agent_r: float = 0.45
+    agent_r: float = 0.35
 
     # -----------------------------------------------------
     # Reward settings
     # -----------------------------------------------------
-    success_bonus: float = 25.0
-    step_penalty: float = 0.05
+    success_bonus: float = 100.0
+    step_penalty: float = 0.02
     collision_penalty: float = 5.0
     oob_penalty: float = 5.0
-    speed_penalty: float = 0.5
+    speed_penalty: float = 1.0
     fall_penalty: float = 6.0
 
 
@@ -211,6 +217,68 @@ class BraxAntBase:
         return vel
 
     # =====================================================
+    # Geometry helpers
+    # =====================================================
+    def _point_to_segment_distance(
+        self,
+        p: np.ndarray,
+        a: np.ndarray,
+        b: np.ndarray,
+    ) -> Tuple[float, float]:
+        """
+        Distance from point p to segment [a, b].
+
+        Returns
+        -------
+        dist : float
+            Euclidean distance from p to the segment.
+        t_clamped : float
+            Projection factor clamped in [0, 1].
+            0 means near a, 1 means near b.
+        """
+        ab = b - a
+        ab2 = float(np.dot(ab, ab))
+
+        if ab2 < 1e-12:
+            return float(np.linalg.norm(p - a)), 0.0
+
+        t = float(np.dot(p - a, ab) / ab2)
+        t_clamped = max(0.0, min(1.0, t))
+        proj = a + t_clamped * ab
+        dist = float(np.linalg.norm(p - proj))
+        return dist, t_clamped
+
+    def _path_blocked_by_any_obstacle(
+        self,
+        start: np.ndarray,
+        goal: np.ndarray,
+        obs_xy: np.ndarray,
+        obs_r: np.ndarray,
+    ) -> bool:
+        """
+        Returns True if at least one obstacle truly blocks the direct
+        start->goal corridor.
+
+        The obstacle must:
+          - project onto the interior of the segment
+          - be close enough to the segment to intersect the corridor
+        """
+        corridor_extra = self.cfg.path_blocking_extra_margin
+
+        for c, r in zip(obs_xy, obs_r):
+            dist, alpha = self._point_to_segment_distance(c, start, goal)
+
+            # Must lie on the interior section, not near the endpoints
+            if alpha <= 0.20 or alpha >= 0.80:
+                continue
+
+            blocking_radius = float(r) + self.cfg.agent_r + corridor_extra
+            if dist <= blocking_radius:
+                return True
+
+        return False
+
+    # =====================================================
     # Random sampling helpers
     # =====================================================
     def _sample_point_in_arena(
@@ -241,7 +309,7 @@ class BraxAntBase:
           - not too close to start
           - not too far from start
         """
-        for _ in range(3000):
+        for _ in range(4000):
             goal = self._sample_point_in_arena(rng, self.cfg.wall_margin)
             d = float(np.linalg.norm(goal - start))
 
@@ -253,9 +321,11 @@ class BraxAntBase:
             return goal
 
         # fallback
-        fallback = (start + np.array([3.5, 0.0], dtype=np.float32)).astype(np.float32)
+        direction = np.array([1.0, 0.0], dtype=np.float32)
+        fallback = (
+            start + direction * min(self.cfg.start_goal_max_dist, 4.8)
+        ).astype(np.float32)
 
-        # clamp fallback inside arena margins
         a = self.cfg.arena_size - self.cfg.wall_margin
         fallback[0] = np.clip(fallback[0], -a, a)
         fallback[1] = np.clip(fallback[1], -a, a)
@@ -270,8 +340,6 @@ class BraxAntBase:
         """
         Checks that the goal success region does not overlap or get
         too close to any obstacle.
-
-        We want the success circle centered at the goal to remain clear.
         """
         for j in range(len(obs_xy)):
             d = float(np.linalg.norm(goal - obs_xy[j]))
@@ -303,33 +371,30 @@ class BraxAntBase:
           - not too close to goal center
           - not too close to the goal success zone
         """
-        # wall margin
+        effective_wall = self.cfg.wall_margin + r
+
         if (
-            abs(float(c[0])) > self.cfg.arena_size - self.cfg.wall_margin
-            or abs(float(c[1])) > self.cfg.arena_size - self.cfg.wall_margin
+            abs(float(c[0])) > self.cfg.arena_size - effective_wall
+            or abs(float(c[1])) > self.cfg.arena_size - effective_wall
         ):
             return False
 
-        # obstacle-obstacle separation
         for j in range(len(obs_xy)):
             d = float(np.linalg.norm(c - obs_xy[j]))
             min_sep = r + obs_r[j] + self.cfg.obstacle_min_separation
             if d <= min_sep:
                 return False
 
-        # keep away from start
         d_start = float(np.linalg.norm(c - start))
         min_start_sep = r + self.cfg.agent_r + self.cfg.start_clearance_extra
         if d_start <= min_start_sep:
             return False
 
-        # keep away from goal center
         d_goal = float(np.linalg.norm(c - goal))
         min_goal_center_sep = r + self.cfg.agent_r + self.cfg.goal_clearance_extra
         if d_goal <= min_goal_center_sep:
             return False
 
-        # keep away from the goal success region
         min_goal_success_sep = (
             r
             + self.cfg.goal_radius
@@ -349,18 +414,18 @@ class BraxAntBase:
         """
         Samples one important obstacle near the direct start->goal path.
 
-        This guarantees that at least one obstacle is relevant for navigation.
+        This obstacle is intended to truly interfere with the direct path.
         """
         direction = goal - start
         norm = float(np.linalg.norm(direction))
 
         if norm < 1e-6:
-            return np.array([0.0, 0.0], dtype=np.float32), 0.45
+            return np.array([0.0, 0.0], dtype=np.float32), 0.30
 
         u = direction / norm
         perp = np.array([-u[1], u[0]], dtype=np.float32)
 
-        for _ in range(2000):
+        for _ in range(4000):
             r = float(
                 rng.uniform(
                     self.cfg.obstacle_radius_min,
@@ -368,36 +433,69 @@ class BraxAntBase:
                 )
             )
 
-            # choose a point along the middle portion of the path
-            alpha = float(rng.uniform(0.35, 0.70))
-            base = start + alpha * direction
-
-            # apply a random lateral shift
-            lateral = float(
+            alpha = float(
                 rng.uniform(
-                    -self.cfg.path_obstacle_offset,
-                    self.cfg.path_obstacle_offset,
+                    self.cfg.path_alpha_min,
+                    self.cfg.path_alpha_max,
                 )
             )
+            base = start + alpha * direction
+
+            lateral_limit = min(
+                self.cfg.path_obstacle_offset,
+                r + self.cfg.agent_r + self.cfg.path_blocking_extra_margin - 0.02,
+            )
+            lateral_limit = max(lateral_limit, 0.02)
+
+            lateral = float(rng.uniform(-lateral_limit, lateral_limit))
             c = (base + lateral * perp).astype(np.float32)
 
-            if self._is_obstacle_valid(c, r, [], [], start, goal):
+            if not self._is_obstacle_valid(c, r, [], [], start, goal):
+                continue
+
+            if self._path_blocked_by_any_obstacle(
+                start=start,
+                goal=goal,
+                obs_xy=np.asarray([c], dtype=np.float32),
+                obs_r=np.asarray([r], dtype=np.float32),
+            ):
                 return c, r
 
-        # fallback: still try to stay near the path but not inside goal zone
-        c = (start + 0.50 * direction).astype(np.float32)
-        r = 0.45
+        # fallback near the center of the segment
+        r = 0.30
+        alpha = 0.50
+        c = (start + alpha * direction).astype(np.float32)
 
         if self._is_obstacle_valid(c, r, [], [], start, goal):
-            return c, r
-
-        # final safe fallback
-        for _ in range(3000):
-            c = self._sample_point_in_arena(rng, self.cfg.wall_margin)
-            if self._is_obstacle_valid(c, r, [], [], start, goal):
+            if self._path_blocked_by_any_obstacle(
+                start=start,
+                goal=goal,
+                obs_xy=np.asarray([c], dtype=np.float32),
+                obs_r=np.asarray([r], dtype=np.float32),
+            ):
                 return c, r
 
-        return np.array([0.0, 0.0], dtype=np.float32), 0.45
+        # final fallback random search
+        for _ in range(4000):
+            r = float(
+                rng.uniform(
+                    self.cfg.obstacle_radius_min,
+                    self.cfg.obstacle_radius_max,
+                )
+            )
+            c = self._sample_point_in_arena(rng, self.cfg.wall_margin)
+            if not self._is_obstacle_valid(c, r, [], [], start, goal):
+                continue
+            if self._path_blocked_by_any_obstacle(
+                start=start,
+                goal=goal,
+                obs_xy=np.asarray([c], dtype=np.float32),
+                obs_r=np.asarray([r], dtype=np.float32),
+            ):
+                return c, r
+
+        # last-resort fallback
+        return np.array([0.0, 0.0], dtype=np.float32), 0.30
 
     def _sample_obstacles_for_one_env(
         self,
@@ -415,16 +513,14 @@ class BraxAntBase:
         obs_xy = []
         obs_r = []
 
-        # first obstacle near the direct path
         c0, r0 = self._sample_path_obstacle_for_one_env(rng, start, goal)
         obs_xy.append(c0)
         obs_r.append(r0)
 
-        # remaining controlled random obstacles
         for _ in range(self.cfg.n_obstacles - 1):
             placed = False
 
-            for _ in range(3000):
+            for _ in range(4000):
                 r = float(
                     rng.uniform(
                         self.cfg.obstacle_radius_min,
@@ -440,10 +536,9 @@ class BraxAntBase:
                     break
 
             if not placed:
-                # fallback for one obstacle
-                for _ in range(3000):
+                for _ in range(4000):
                     c = self._sample_point_in_arena(rng, self.cfg.wall_margin)
-                    r = 0.45
+                    r = 0.30
                     if self._is_obstacle_valid(c, r, obs_xy, obs_r, start, goal):
                         obs_xy.append(c)
                         obs_r.append(r)
@@ -451,10 +546,8 @@ class BraxAntBase:
                         break
 
             if not placed:
-                # final fallback
-                # pick a neutral but still reasonable value
                 obs_xy.append(np.array([0.0, 0.0], dtype=np.float32))
-                obs_r.append(0.45)
+                obs_r.append(0.30)
 
         obs_xy_arr = np.stack(obs_xy, axis=0).astype(np.float32)
         obs_r_arr = np.array(obs_r, dtype=np.float32)
@@ -481,37 +574,39 @@ class BraxAntBase:
 
         for env_i in range(self.cfg.num_envs):
             rng = np.random.default_rng(base_seed + 10_000 * env_i)
-
             start_i = starts_xy[env_i].astype(np.float32)
 
-            # sample goal
-            goal_i = self._sample_goal_for_one_env(rng, start_i)
+            layout_found = False
+            last_goal = None
+            last_obs_xy = None
+            last_obs_r = None
 
-            # sample obstacles
-            obs_xy_i, obs_r_i = self._sample_obstacles_for_one_env(rng, start_i, goal_i)
+            for _ in range(500):
+                goal_i = self._sample_goal_for_one_env(rng, start_i)
+                obs_xy_i, obs_r_i = self._sample_obstacles_for_one_env(rng, start_i, goal_i)
 
-            # extra safety pass: ensure goal success region is clean
-            # if not, try again a few times
-            if not self._is_goal_valid_against_obstacles(goal_i, obs_xy_i, obs_r_i):
-                placed_clean = False
+                last_goal = goal_i
+                last_obs_xy = obs_xy_i
+                last_obs_r = obs_r_i
 
-                for _ in range(200):
-                    goal_i_try = self._sample_goal_for_one_env(rng, start_i)
-                    obs_xy_try, obs_r_try = self._sample_obstacles_for_one_env(
-                        rng, start_i, goal_i_try
-                    )
+                if not self._is_goal_valid_against_obstacles(goal_i, obs_xy_i, obs_r_i):
+                    continue
 
-                    if self._is_goal_valid_against_obstacles(goal_i_try, obs_xy_try, obs_r_try):
-                        goal_i = goal_i_try
-                        obs_xy_i = obs_xy_try
-                        obs_r_i = obs_r_try
-                        placed_clean = True
-                        break
+                if not self._path_blocked_by_any_obstacle(
+                    start=start_i,
+                    goal=goal_i,
+                    obs_xy=obs_xy_i,
+                    obs_r=obs_r_i,
+                ):
+                    continue
 
-                if not placed_clean:
-                    # keep last valid-enough sample even if imperfect,
-                    # but most of the time this second pass should succeed
-                    pass
+                layout_found = True
+                break
+
+            if not layout_found:
+                goal_i = last_goal
+                obs_xy_i = last_obs_xy
+                obs_r_i = last_obs_r
 
             all_goal.append(goal_i)
             all_obs_xy.append(obs_xy_i)
@@ -537,13 +632,11 @@ class BraxAntBase:
 
         self.t = np.zeros((self.cfg.num_envs,), dtype=np.int32)
 
-        # true physical start positions from Brax
         torso_xy = self._get_torso_xy()
 
         base_seed = int(np.array(rng_key[0], dtype=np.uint32))
         self.goal, self.obs_xy, self.obs_r = self._sample_task_layout(base_seed, torso_xy)
 
-        # initialize short history from true reset position
         self.torso_xy_tminus2 = torso_xy.copy()
         self.torso_xy_tminus1 = torso_xy.copy()
         self.torso_xy_t = torso_xy.copy()
@@ -573,7 +666,6 @@ class BraxAntBase:
         torso_vxy = self._get_torso_vxy()
         goal_vec = (self.goal - torso_xy).astype(np.float32)
 
-        # obstacle positions relative to the current torso position
         obs_rel_xy = (self.obs_xy - torso_xy[:, None, :]).astype(np.float32)
         obs_rel_xy = obs_rel_xy.reshape(self.cfg.num_envs, -1)
 
@@ -666,9 +758,6 @@ class BraxAntBase:
     def _collision(self) -> np.ndarray:
         """
         Collision occurs when min obstacle margin <= 0.
-
-        Returns:
-            bool array of shape (num_envs,)
         """
         return self._min_margin() <= 0.0
 
@@ -676,9 +765,6 @@ class BraxAntBase:
         """
         Buffer violation:
           0 < min_margin < buffer_dist
-
-        Returns:
-            bool array of shape (num_envs,)
         """
         mm = self._min_margin()
         return (mm > 0.0) & (mm < self.cfg.buffer_dist)
@@ -686,9 +772,6 @@ class BraxAntBase:
     def _speed_violation(self) -> np.ndarray:
         """
         Speed violation based on torso planar speed.
-
-        Returns:
-            bool array of shape (num_envs,)
         """
         vxy = self._get_torso_vxy()
         speed = np.linalg.norm(vxy, axis=1)
@@ -697,9 +780,6 @@ class BraxAntBase:
     def _fall(self) -> np.ndarray:
         """
         Falling is detected when torso height z is below the threshold.
-
-        Returns:
-            bool array of shape (num_envs,)
         """
         z = self._get_torso_z()
         return z < self.cfg.fall_threshold
@@ -707,9 +787,6 @@ class BraxAntBase:
     def _success(self) -> np.ndarray:
         """
         Success occurs when the torso reaches the goal radius.
-
-        Returns:
-            bool array of shape (num_envs,)
         """
         return self._dist_to_goal() < self.cfg.goal_radius
 
@@ -719,9 +796,6 @@ class BraxAntBase:
     def _metrics(self, **overrides) -> Dict[str, np.ndarray]:
         """
         Builds the default metrics dictionary for all parallel envs.
-
-        These low-level metrics are still useful internally.
-        Final paper/prof metrics can be computed later in train/eval code.
         """
         metrics = {
             "success": self._success().astype(np.float32),

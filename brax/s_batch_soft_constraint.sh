@@ -13,7 +13,7 @@ PROJECT_DIR="/home/jean17/projects/def-cbelling-ab/jean17/csi_4900_brax"
 CONTAINER="${PROJECT_DIR}/python_3.10.sif"
 
 MODEL_NAME="soft_constraint"
-TIMESTEPS=131072
+TIMESTEPS=10000000
 RESULTS_ROOT="Results"
 SEEDS=(0 1 2 3 4)
 
@@ -34,10 +34,14 @@ EVAL_EVERY_ITERS=5
 EVAL_EPS=50
 FINAL_EVAL_EPS=200
 ROLLOUTS_PER_SEED=3
-CHECKPOINT_EVERY_TIMESTEPS=131072
+CHECKPOINT_EVERY_TIMESTEPS=524288
 
 NUM_ENVS=512
 MAX_STEPS=300
+
+STEPS_PER_ITER=$((STEPS_PER_ENV * NUM_ENVS))
+NUM_ITERS=$(( (TIMESTEPS + STEPS_PER_ITER - 1) / STEPS_PER_ITER ))
+ACTUAL_TOTAL_TIMESTEPS=$(( NUM_ITERS * STEPS_PER_ITER ))
 
 if (( TIMESTEPS >= 1000000 )) && (( TIMESTEPS % 1000000 == 0 )); then
     BUDGET_TAG="t$((TIMESTEPS / 1000000))m"
@@ -52,14 +56,17 @@ cd "${PROJECT_DIR}"
 PIPELINE_START=$(date '+%Y-%m-%d %H:%M:%S')
 echo "============================================================"
 echo "Submitting CSI4900 pipeline for model: ${MODEL_NAME}"
-echo "Start time        : ${PIPELINE_START}"
-echo "Project directory : ${PROJECT_DIR}"
-echo "Container         : ${CONTAINER}"
-echo "Budget tag        : ${BUDGET_TAG}"
-echo "Requested steps   : ${TIMESTEPS}"
-echo "Actual steps/run  : 19922944"
-echo "Seeds             : ${SEEDS[*]}"
-echo "Submit job ID     : ${SLURM_JOB_ID}"
+echo "Start time           : ${PIPELINE_START}"
+echo "Project directory    : ${PROJECT_DIR}"
+echo "Container            : ${CONTAINER}"
+echo "Budget tag           : ${BUDGET_TAG}"
+echo "Requested timesteps  : ${TIMESTEPS}"
+echo "Steps per iter       : ${STEPS_PER_ITER}"
+echo "Num iters            : ${NUM_ITERS}"
+echo "Actual steps/run     : ${ACTUAL_TOTAL_TIMESTEPS}"
+echo "Checkpoint every     : ${CHECKPOINT_EVERY_TIMESTEPS}"
+echo "Seeds                : ${SEEDS[*]}"
+echo "Submit job ID        : ${SLURM_JOB_ID}"
 echo "============================================================"
 
 TRAIN_JOB_IDS=()
@@ -71,7 +78,7 @@ for SEED in "${SEEDS[@]}"; do
 #SBATCH --job-name=${MODEL_NAME}_s${SEED}
 #SBATCH --output=${MODEL_NAME}_seed_${SEED}_%j.txt
 #SBATCH --error=${MODEL_NAME}_seed_${SEED}_%j.txt
-#SBATCH --time=6-00:00:00
+#SBATCH --time=7-00:00:00
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -86,11 +93,16 @@ cd "\${PROJECT_DIR}"
 TRAIN_START=\$(date '+%Y-%m-%d %H:%M:%S')
 echo "============================================================"
 echo "Starting training job for model=${MODEL_NAME}, seed=${SEED}"
-echo "Start time        : \${TRAIN_START}"
-echo "Project directory : \${PROJECT_DIR}"
-echo "Container         : \${CONTAINER}"
-echo "Job ID            : \${SLURM_JOB_ID}"
-echo "Node              : \${SLURMD_NODENAME}"
+echo "Start time           : \${TRAIN_START}"
+echo "Project directory    : \${PROJECT_DIR}"
+echo "Container            : \${CONTAINER}"
+echo "Requested timesteps  : ${TIMESTEPS}"
+echo "Steps per iter       : ${STEPS_PER_ITER}"
+echo "Num iters            : ${NUM_ITERS}"
+echo "Actual steps/run     : ${ACTUAL_TOTAL_TIMESTEPS}"
+echo "Checkpoint every     : ${CHECKPOINT_EVERY_TIMESTEPS}"
+echo "Job ID               : \${SLURM_JOB_ID}"
+echo "Node                 : \${SLURMD_NODENAME}"
 echo "============================================================"
 
 module load apptainer/1.4.5
@@ -147,7 +159,7 @@ apptainer exec \
 TRAIN_END=\$(date '+%Y-%m-%d %H:%M:%S')
 echo "============================================================"
 echo "Finished training job for model=${MODEL_NAME}, seed=${SEED}"
-echo "End time          : \${TRAIN_END}"
+echo "End time             : \${TRAIN_END}"
 echo "============================================================"
 EOF
 )

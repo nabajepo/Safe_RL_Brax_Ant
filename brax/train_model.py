@@ -10,6 +10,7 @@
 # =========================================================
 
 import argparse
+import math
 from pathlib import Path
 
 from baseline_env import Cfg
@@ -90,8 +91,35 @@ def parse_args():
     return parser.parse_args()
 
 
+def validate_args(args):
+    if args.timesteps <= 0:
+        raise ValueError("--timesteps must be > 0")
+    if args.steps_per_env <= 0:
+        raise ValueError("--steps_per_env must be > 0")
+    if args.num_envs <= 0:
+        raise ValueError("--num_envs must be > 0")
+    if args.max_steps <= 0:
+        raise ValueError("--max_steps must be > 0")
+    if args.eval_every_iters <= 0:
+        raise ValueError("--eval_every_iters must be > 0")
+    if args.eval_eps <= 0:
+        raise ValueError("--eval_eps must be > 0")
+    if args.final_eval_eps <= 0:
+        raise ValueError("--final_eval_eps must be > 0")
+    if args.rollouts_per_seed < 0:
+        raise ValueError("--rollouts_per_seed must be >= 0")
+    if args.minibatch_size <= 0:
+        raise ValueError("--minibatch_size must be > 0")
+    if args.ppo_epochs <= 0:
+        raise ValueError("--ppo_epochs must be > 0")
+    if args.hidden_dim <= 0:
+        raise ValueError("--hidden_dim must be > 0")
+
+
 def main():
     args = parse_args()
+    validate_args(args)
+
     model_name = args.model_name
     seed = args.seed
 
@@ -104,14 +132,21 @@ def main():
     budget_dir = Path(args.results_root) / budget_tag
     ensure_dir(budget_dir)
 
+    steps_per_iter = args.steps_per_env * args.num_envs
+    num_iters = max(1, math.ceil(args.timesteps / steps_per_iter))
+    actual_total_timesteps = num_iters * steps_per_iter
+
     print("\n" + "#" * 90, flush=True)
     print(f"Training configuration ({model_name})", flush=True)
     print(f"seed                       : {seed}", flush=True)
-    print(f"timesteps                  : {args.timesteps}", flush=True)
+    print(f"requested timesteps        : {args.timesteps}", flush=True)
     print(f"budget_tag                 : {budget_tag}", flush=True)
     print(f"num_envs                   : {args.num_envs}", flush=True)
     print(f"max_steps                  : {args.max_steps}", flush=True)
     print(f"steps_per_env              : {args.steps_per_env}", flush=True)
+    print(f"steps_per_iter             : {steps_per_iter}", flush=True)
+    print(f"num_iters                  : {num_iters}", flush=True)
+    print(f"actual_total_timesteps     : {actual_total_timesteps}", flush=True)
     print(f"ppo_epochs                 : {args.ppo_epochs}", flush=True)
     print(f"minibatch_size             : {args.minibatch_size}", flush=True)
     print(f"hidden_dim                 : {args.hidden_dim}", flush=True)
@@ -143,6 +178,7 @@ def main():
 
     print(f"\nTraining completed for model: {model_name} | seed={seed}", flush=True)
     print(f"Results available in: {model_budget_dir / f'seed_{seed}'}", flush=True)
+
 
 if __name__ == "__main__":
     main()
