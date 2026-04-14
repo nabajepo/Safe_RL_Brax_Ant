@@ -53,7 +53,7 @@ class BraxAntSoftConstraint(BraxAntBase):
         #   stronger progress reward - small step penalty
         # -----------------------------------------------
         progress = self._progress_reward(dist_before, dist_after)
-        reward = 3.0 * progress - self.cfg.step_penalty
+        reward = 4.0 * progress - self.cfg.step_penalty
 
         # -----------------------------------------------
         # Soft safety checks
@@ -76,6 +76,7 @@ class BraxAntSoftConstraint(BraxAntBase):
         # -----------------------------------------------
         success = self._success().astype(np.float32)
         reward = reward + success * self.cfg.success_bonus
+        reward += np.exp(-dist_after) * 0.75 #dense goal shaping
 
         # -----------------------------------------------
         # Episode termination:

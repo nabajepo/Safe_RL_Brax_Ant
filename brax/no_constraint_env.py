@@ -53,7 +53,7 @@ class BraxAntNoConstraint(BraxAntBase):
         # -----------------------------------------------
         progress = self._progress_reward(dist_before, dist_after)
         reward = progress - self.cfg.step_penalty
-
+        reward += np.exp(-dist_after) * 0.75 #dense goal shaping
         # -----------------------------------------------
         # Success check
         # -----------------------------------------------

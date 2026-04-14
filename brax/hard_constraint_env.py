@@ -12,12 +12,13 @@
 #   - terminate the episode immediately on:
 #       * collision
 #       * out_of_bounds
+#       * speed_violation
 #       * fall
 #   - success still gives a positive bonus
 #
-# Important:
-#   - speed violation is penalized strongly
-#   - but does NOT terminate the episode immediately
+# This version is strict:
+#   - stronger progress reward
+#   - speed violation is treated as a hard violation again
 # =========================================================
 
 import numpy as np
@@ -33,10 +34,8 @@ class BraxAntHardConstraint(BraxAntBase):
       - collision
       - out_of_bounds
       - fall
-
-    Speed violation:
-      - strong penalty
-      - no immediate termination
+    Severe penality for speed violation, but not immediate termination (to allow learning to recover from it):
+        - speed_violation
     """
 
     def step(self, action):
@@ -60,7 +59,7 @@ class BraxAntHardConstraint(BraxAntBase):
         #   stronger progress reward - small step penalty
         # -----------------------------------------------
         progress = self._progress_reward(dist_before, dist_after)
-        reward = 3.0 * progress - self.cfg.step_penalty
+        reward = 4.0 * progress - self.cfg.step_penalty
 
         # -----------------------------------------------
         # Safety checks
@@ -75,10 +74,7 @@ class BraxAntHardConstraint(BraxAntBase):
         # -----------------------------------------------
         reward = reward - collision * self.cfg.collision_penalty
         reward = reward - oob * self.cfg.oob_penalty
-
-        # stronger penalty for speed, but no hard termination
-        reward = reward - speed_violation * (2.0 * self.cfg.speed_penalty)
-
+        reward = reward - speed_violation * self.cfg.speed_penalty * 2.0  # stronger penalty for speed violation
         reward = reward - fall * self.cfg.fall_penalty
 
         # -----------------------------------------------
@@ -86,16 +82,16 @@ class BraxAntHardConstraint(BraxAntBase):
         # -----------------------------------------------
         success = self._success().astype(np.float32)
         reward = reward + success * self.cfg.success_bonus
+        reward += np.exp(-dist_after) * 0.75 #dense goal shaping
 
         # -----------------------------------------------
         # Hard termination
         #   - success
         #   - collision
         #   - out_of_bounds
+        #   - speed_violation
         #   - fall
         #   - max_steps
-        #
-        # Speed violation does NOT terminate immediately
         # -----------------------------------------------
         done = (
             (success > 0.0)

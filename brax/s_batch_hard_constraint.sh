@@ -78,7 +78,7 @@ for SEED in "${SEEDS[@]}"; do
 #SBATCH --job-name=${MODEL_NAME}_s${SEED}
 #SBATCH --output=${MODEL_NAME}_seed_${SEED}_%j.txt
 #SBATCH --error=${MODEL_NAME}_seed_${SEED}_%j.txt
-#SBATCH --time=7-00:00:00
+#SBATCH --time=6-00:00:00
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
