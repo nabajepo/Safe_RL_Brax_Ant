@@ -36,10 +36,29 @@ This visualization shows:
 
 ---
 
+# Research Questions
+
+This project investigates the following questions:
+
+1. Does Proximal Policy Optimization (PPO) inherently learn safe navigation behaviors?
+2. How do different constraint mechanisms affect safety violations during training?
+3. What trade-off exists between task performance and safety enforcement?
+
+We hypothesize that:
+
+- PPO without constraints will learn policies that maximize reward but ignore safety.
+- Soft penalties will partially reduce unsafe behavior.
+- Hard constraints will enforce safety more effectively but may reduce task performance.
+
+---
+
 # Project Structure
 
 ```txt
-Honour-s_Project
+Safe_RL_Brax_Ant
+│
+├── docs                         # Project report and documentation
+│   └── Honours_Report.pdf
 │
 ├── envs                         # Reinforcement learning environments
 │   ├── baseline_env.py
@@ -52,21 +71,21 @@ Honour-s_Project
 │   ├── train_model.py
 │   └── aggregate_models.py
 │
-├── slurm                        # Slurm batch scripts
+├── slurm                        # Slurm batch scripts for Compute Canada
 │   ├── hard_constraint_pipeline.sh
 │   ├── soft_constraint_pipeline.sh
 │   └── no_constraint_pipeline.sh
 │
-├── gifs                         # Rollout visualizations
+├── gifs                         # Rollout visualizations (GIF format)
 │
 ├── demo                         # Demonstration videos
 │
-├── policies                     # Trained policies
+├── policies                     # Saved trained models
 │
 ├── results                      # Training metrics and learning curves
 │
-├── requirements.txt             # Python dependencies
-└── README.md
+├── README.md                    # Project documentation
+└── requirements.txt             # Python dependencies
 ```
 
 ---
@@ -190,6 +209,32 @@ This visualization shows:
 ```txt
  The agent strongly avoids obstacles and respects safety buffers.However, strict constraints sometimes prevent the agent from reaching the goal, highlighting the trade-off between safety and task completion. 
 ```
+
+---
+
+# Key Results
+
+The experiments compare the three constraint strategies over 100M training timesteps.
+
+Main observations:
+
+- **No Constraint** reaches the goal but produces many unsafe behaviors.
+- **Soft Constraint** achieves the highest success rate but still produces many safety violations.
+- **Hard Constraint** strongly reduces safety violations, but with a lower success rate.
+
+Final evaluation summary:
+
+| Model | Success Rate | Violations / 100 Steps | Avg Collisions / Episode | Avg Episode Reward |
+|------|--------------|------------------------|---------------------------|--------------------|
+| No Constraint | 0.299 | 42.39 | 10.80 | 22.23 |
+| Soft Constraint | 0.342 | 38.76 | 12.00 | -535.87 |
+| Hard Constraint | 0.270 | 7.04 | 10.30 | -22.86 |
+
+These results show a clear **safety–performance trade-off**.  
+Soft constraints improve task success but do not fully prevent unsafe behavior, while hard constraints enforce safety more strongly at the cost of reduced task performance.
+
+
+![Constraint Comparison](results/aggregated_metrics/comparison_plot.png)
 
 ---
 
@@ -404,7 +449,18 @@ Evaluation metrics:
 
 These metrics summarize the performance and safety behavior of each training strategy.
 
+
+
 ---
 
 # License
 This project is provided for academic and research purposes.
+
+---
+
+# Report
+
+The full research report describing the methodology, experiments, and analysis is available in:
+```txt
+docs/Honours_Report.pdf
+```
