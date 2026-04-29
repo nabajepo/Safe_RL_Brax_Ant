@@ -167,11 +167,9 @@ Example (3D):
 
 ![Soft Constraint Demo](demo/soft_constraint_demo.gif)
 
-Observation::
+Observation:
 ```txt
- The agent attempts to avoid obstacles but often chooses aggressive or unsafe trajectories to reach the goal.
-
-This suggests that penalties alone may not be sufficient to enforce safe navigation. 
+ The agent attempts to avoid obstacles but often chooses aggressive or unsafe trajectories to reach the goal.This suggests that penalties alone may not be sufficient to enforce safe navigation. 
 ```
 
 ## Hard Constraint
@@ -183,15 +181,14 @@ Safety violations immediately terminate the episode:
 - fall
 
 Speed violations receive a strong penalty.
+
 Example (3D):
 
 ![Hard Constraint Demo](demo/hard_constraint_demo.gif)
 
 This visualization shows:
 ```txt
- The agent strongly avoids obstacles and respects safety buffers.
-
-However, strict constraints sometimes prevent the agent from reaching the goal, highlighting the trade-off between safety and task completion. 
+ The agent strongly avoids obstacles and respects safety buffers.However, strict constraints sometimes prevent the agent from reaching the goal, highlighting the trade-off between safety and task completion. 
 ```
 
 ---
@@ -247,7 +244,9 @@ with your email:
 ```txt
 #SBATCH --mail-user=your_email@domain.com  
 ```
+
 You will receive a notification once training completes.
+
 ---
 
 ### Update project directory
