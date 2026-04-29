@@ -164,7 +164,7 @@ max_steps = 500      # Maximum number of steps allowed per episode before the ep
 
 Example (3D):
 
-![No Constraint Demo](demo/no_constraint_demo.gif)
+![No Constraint Demo](media/demo/no_constraint_demo.gif)
 
 Observation:
 ```txt
@@ -184,7 +184,7 @@ But the episode **continues**.
 
 Example (3D):
 
-![Soft Constraint Demo](demo/soft_constraint_demo.gif)
+![Soft Constraint Demo](media/demo/soft_constraint_demo.gif)
 
 Observation:
 ```txt
@@ -203,7 +203,7 @@ Speed violations receive a strong penalty.
 
 Example (3D):
 
-![Hard Constraint Demo](demo/hard_constraint_demo.gif)
+![Hard Constraint Demo](media/demo/hard_constraint_demo.gif)
 
 This visualization shows:
 ```txt
