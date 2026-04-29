@@ -1,4 +1,4 @@
-🐜 Safe Reinforcement Learning for Robot Navigation (Brax Ant)
+# 🐜 Safe Reinforcement Learning for Robot Navigation (Brax Ant)
 
 This project investigates **safe reinforcement learning strategies for robotic navigation** using the **Brax Ant environment**.  
 The objective is to compare different constraint strategies for safe navigation in environments containing obstacles.
@@ -145,7 +145,7 @@ max_steps = 500      # Maximum number of steps allowed per episode before the ep
 
 Example (3D):
 
-![No Constraint Demo](demo/no_constraint_demo.mp4)
+![No Constraint Demo](demo/no_constraint_demo.gif)
 
 Observation:
 ```txt
@@ -165,7 +165,7 @@ But the episode **continues**.
 
 Example (3D):
 
-![Soft Constraint Demo](demo/soft_constraint_demo.mp4)
+![Soft Constraint Demo](demo/soft_constraint_demo.gif)
 
 Observation::
 ```txt
@@ -185,7 +185,7 @@ Safety violations immediately terminate the episode:
 Speed violations receive a strong penalty.
 Example (3D):
 
-![Hard Constraint Demo](demo/hard_constraint_demo.mp4)
+![Hard Constraint Demo](demo/hard_constraint_demo.gif)
 
 This visualization shows:
 ```txt
@@ -269,7 +269,7 @@ PROJECT_DIR="/home/username/project_directory"
 Make sure the container exists:
 ```txt
 CONTAINER="${PROJECT_DIR}/python_3.10.sif"
-``
+```
 
 ---
 
@@ -402,7 +402,9 @@ Evaluation metrics:
 6. avg_episode_reward           # Average cumulative reward per episode
 
 ```
+
 These metrics summarize the performance and safety behavior of each training strategy.
+
 ---
 
 # License
