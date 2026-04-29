@@ -212,7 +212,7 @@ This visualization shows:
 
 ---
 
-# Example of Key Results
+# Example of Key Results (Aggregated over 5 seeds)
 
 The experiments compare the three constraint strategies over 100M training timesteps.
 
