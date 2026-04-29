@@ -24,7 +24,7 @@ The experiments are designed to run on **Compute Canada HPC clusters** using **S
 
 Example rollout of a trained agent (2D):
 
-![Hard Constraint Demo](gifs/hard_constraint/seed_4/rollout_2.gif)
+![Hard Constraint Demo](media/gifs/hard_constraint/seed_4/rollout_2.gif)
 
 This visualization shows:
 
