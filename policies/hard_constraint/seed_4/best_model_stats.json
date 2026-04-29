@@ -1,0 +1,22 @@
+{
+  "iteration": 190,
+  "timesteps": 49807360,
+  "max_steps": 0.0,
+  "iter_time_sec": 170.75012639001943,
+  "eval_time_sec": 289.53058899985626,
+  "elapsed_time_sec": 38922.967876231065,
+  "timesteps_per_sec": 1535.2492296329137,
+  "episodes": 50,
+  "success_rate": 0.38,
+  "mean_episode_length": 160.08,
+  "avg_episode_reward": 12.549761008908972,
+  "violations_per_100_steps": 3.9587509638565264,
+  "avg_time_to_failure": 95.02777777777777,
+  "failure_rate": 0.72,
+  "avg_collisions_per_episode": 4.76,
+  "avg_oob_per_episode": 0.06,
+  "avg_speed_violations_per_episode": 1.42,
+  "avg_falls_per_episode": 0.4,
+  "avg_total_violations_per_episode": 6.64,
+  "best_score": 0.0
+}
