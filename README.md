@@ -76,9 +76,9 @@ Safe_RL_Brax_Ant
 │   ├── soft_constraint_pipeline.sh
 │   └── no_constraint_pipeline.sh
 │
-├── gifs                         # Rollout visualizations (GIF format)
-│
-├── demo                         # Demonstration videos
+├── media
+|   ├── gifs                     # Rollout visualizations (GIF format)
+|   └── demo                     # Demonstration videos
 │
 ├── policies                     # Saved trained models
 │
