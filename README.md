@@ -240,14 +240,37 @@ Soft constraints improve task success but do not fully prevent unsafe behavior, 
 
 # Installation
 
-Python version used:
-```txt
-Python 3.10
+### 1. Load Apptainer
+```bash
+module load apptainer/1.4.5
 ```
 
-Install dependencies:
+### 2. Download Python 3.10 container
 ```bash
+apptainer pull python_3.10.sif docker://python:3.10
+```
+
+### 3. Verify Python version inside container
+```bash
+apptainer exec python_3.10.sif python --version
+```
+
+### 4. Create virtual environment inside container
+```bash
+apptainer exec python_3.10.sif python -m venv .venv
+```
+
+### 5. Install dependencies
+```bash
+apptainer exec python_3.10.sif bash -lc "
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
+"
 ```
 
 ---
